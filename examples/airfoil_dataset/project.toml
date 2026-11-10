@@ -1,0 +1,87 @@
+# 단일 익형 양항계수 데이터셋 (인공지능개론 텀프로젝트: CFD 없이 CL/CD를 예측하는 회귀 모델)
+#   형상 120개 (NACA 4자리 60 + UIUC 60) × 받음각 14개 × Re 2개 = 3,360 케이스
+#   Fluent 2D 정상 상태, k-ω SST, 자유류 (직사각형 영역: 앞 = inlet, 위·아래 = 미끄럼 벽, 뒤 = outlet)
+#
+#   afs fetch-airfoils   UIUC 좌표 파일 내려받기 (airfoils/*.dat)
+#   afs plan --dry-run   케이스 목록 확인
+#   afs mesh             형상별 메쉬 120개 (받음각·Re와 공유)
+#   afs run --part 1/4   팀원 4명이 형상 단위로 나눠 실행 (2/4, 3/4, 4/4)
+#   afs collect          summary.csv (cl, cd, 수렴 상태 conv_state 포함)
+#   afs dataset          CST 계수 + 형상 단위 분할 → runs/dataset/
+#   afs train            기준 방법 / LightGBM / MLP 학습·평가 → runs/ml/
+#   afs compare A B      학습 결과끼리 같은 케이스로 비교 (실험 1·2, 개선 실험)
+#   afs edge-cases       경계 사례 10개 + 사례별 그래프
+
+[project]
+name = "airfoil_dataset"
+template = "journal.jou"
+output_dir = "runs"
+max_parallel = 1             # 동시에 돌릴 케이스 수 (라이선스/코어 수 고려)
+# 팀원 4명 분담: 각자 afs run --part K/4 (K = 1~4). 형상 30개씩 840 케이스.
+#   끝나면 각자의 runs/<형상>/ 폴더를 한 runs/ 에 모은 뒤 collect → dataset
+
+[solver]
+kind = "fluent"
+# executable = 'C:\Program Files\ANSYS Inc\v261\fluent\ntbin\win64\fluent.exe'
+mode = "2ddp"
+processes = 4
+graphics = false             # 3,360 케이스라 이미지 저장은 끔 (필요한 케이스만 따로)
+timeout_minutes = 30
+
+[constants]
+base_case = "base_airfoil.cas.h5"   # docs/FLUENT_BASE_CASE_AIRFOIL.md 참고 (경계 main, inlet, top, bottom, outlet)
+turbulence_model = "kw-sst"         # 기록용 (실제 모델은 베이스 케이스 설정). Transition SST 비교 시 바꿔서 기록
+chord = 0.3                         # 코드 [m]: 메쉬 스케일과 Re→유속 환산에만 쓰임 (계수는 Re만의 함수)
+iterations = 3000
+
+[cases]
+csv = "airfoils.csv"                # 열: airfoil(짧은 이름), main_airfoil(NACA 코드 또는 좌표 파일), family
+name = "{airfoil}_Re{reynolds}_a{aoa}"
+group = "{airfoil}"
+
+[cases.sweep]
+aoa = [-4, -2, 0, 2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16]   # 14개, 실속 부근 11~16°는 1° 간격
+reynolds = [200000, 500000]
+
+[derived]                    # Fluent 기본 공기 물성: ρ = 1.225 kg/m³, μ = 1.7894e-5 Pa·s
+velocity = "reynolds * 1.7894e-5 / (1.225 * chord)"   # [m/s] Re 2e5 → 9.7 m/s, 5e5 → 24.3 m/s
+mach = "velocity / 340.29"
+
+[mesh]
+# chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 5e5 기준 → y+ ≤ 1)
+farfield_shape = "box"       # 직사각형 인클로저 (원형은 "circle")
+box_upstream = 20            # 앞전 ~ inlet(앞 경계) [c]
+box_downstream = 40          # 앞전 ~ outlet(뒤 경계) [c]
+box_height = 20              # 시위선 ~ 위·아래 경계 [c] (전체 높이 40c)
+box_far_size = 2.0           # 바깥 경계 셀 크기 [c]
+                             # 경계: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall → Fluent에서 미끄럼 벽), 뒤 = outlet(pressure-outlet)
+y_plus = 1.0
+growth_rate = 1.15
+surface_cells = 200
+wake_angles = [-4, 4, 10, 16]  # 받음각 범위를 덮는 후류 세분화 방향 [deg]
+
+[convergence]                # 수렴 상태 판정 (summary.csv의 conv_state: converged / oscillating / diverged)
+window = 200                 # 마지막 200 반복으로 판정 (average_last와 같게)
+cl_tol = 0.005               # CL 진폭 허용: max(0.005, 1% × |CL|)
+cl_rel_tol = 0.01
+cd_tol = 1e-4                # CD 진폭 허용: max(1e-4, 2% × CD)
+cd_rel_tol = 0.02
+
+[results]
+report_files = ["*.out"]
+average_last = 200           # 수렴 케이스: 마지막 200 반복 평균
+average_last_oscillating = 500  # 진동(oscillating) 케이스: 마지막 500 반복 평균 (기획서 라벨 규칙, conv_cl_std로 불확실성 기록)
+x_param = "aoa"
+wind_axes = true             # cx, cy 리포트 → 받음각으로 회전해 cl, cd
+objective = "max_ld"
+split_by = ["reynolds"]
+
+[ml]                         # afs dataset / train
+holdout_families = ["high_camber"]  # 학습에서 통째로 빼고 최종 평가의 "처음 보는 형상"(test_ood)으로만 사용
+split = [0.70, 0.15, 0.15]          # 나머지 형상의 학습 / 검증 / 최종 평가 비율 (형상 단위, family별 층화)
+seed = 2026
+near_stall_window = 2.0             # 실속 부근 = 형상·Re별 CL 최대 받음각 ± 2°
+train_states = ["converged", "oscillating"]  # 학습에 쓸 수렴 상태 (diverged는 학습·평가에서 빼고 건수만 보고)
+# Transition SST로 다시 푼 케이스 (docs/FLUENT_BASE_CASE_AIRFOIL.md 맨 아래). 지정하면 dataset에 SST와의 차이 열이
+# 붙고, edge-cases가 난류 모델에 따라 정답이 크게 달라지는 사례를 고름. 학습에는 쓰지 않음
+# tsst_summary = "runs_tsst/summary.csv"

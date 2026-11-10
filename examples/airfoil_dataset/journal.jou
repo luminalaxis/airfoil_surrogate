@@ -1,0 +1,46 @@
+; ============================================================
+; airfoil_surrogate 저널 템플릿 (단일 익형, 자유류, 데이터셋 생성용)
+;  - 달러+중괄호 표기는 케이스마다 자동 치환됩니다 (예: 받음각 flow_angle, 유속 velocity)
+;  - 기본 제공 변수: case_name, group, case_dir, project_dir, nprocs, mesh_file, mesh_name
+;  - 메쉬는 형상마다 하나이고 받음각은 유입 방향으로 넣습니다 (inlet 속도 성분이 Named Expression 참조).
+;
+;  준비물: base_airfoil.cas.h5 (docs/FLUENT_BASE_CASE_AIRFOIL.md)
+;  TUI 프롬프트는 Fluent 버전마다 다를 수 있으니, 처음 한 번은
+;  GUI에서 File > Write > Start Journal 로 녹화해 비교해 보세요.
+; ============================================================
+
+; Fluent 콘솔 출력을 케이스 폴더의 transcript.txt 에 남깁니다 (맨 앞에 두세요).
+; Windows에서 -hidden 으로 실행하면 콘솔 출력이 도구로 전달되지 않아서, 도구가 이 파일에서
+; 오류·발산 메시지, 마지막 잔차, 수렴 메시지를 읽습니다. (주석에 오류 검사 문구를 쓰면 transcript에
+;  주석이 찍힐 때 오류로 잡히므로, 저널 주석에는 그 영어 문구를 쓰지 마세요)
+/file/start-transcript "transcript.txt"
+
+/file/read-case "${project_dir}/${base_case}"
+
+; 형상별 메쉬로 교체 (경계 이름 main / inlet / top / bottom / outlet 이 같아서 설정이 유지됨)
+; top / bottom 의 미끄럼 벽(Specified Shear 0) 설정도 베이스 케이스에서 그대로 유지됨
+/file/replace-mesh "${mesh_file}"
+/mesh/check
+
+; 유입 조건: inlet 속도 성분 = (speed·cos(alpha), speed·sin(alpha))
+/define/named-expressions/edit "speed" definition "${velocity:.6f} [m/s]" q
+/define/named-expressions/edit "alpha" definition "${flow_angle} [deg]" q
+
+; 기준값: Re마다 유속이 바뀌므로 매 케이스 갱신 (안 하면 cx, cy가 베이스 케이스 속도로 무차원화됨)
+/report/reference-values/velocity ${velocity:.6f}
+/report/reference-values/density 1.225
+/report/reference-values/length ${chord}
+/report/reference-values/area ${chord}
+
+; 리포트 파일(cx, cy)을 케이스 폴더에 저장 → 도구가 받음각으로 회전해 cl, cd 계산
+/solve/report-files/edit "coef-rfile" file-name "coef-rfile.out" q
+
+/solve/initialize/hyb-initialization
+/solve/iterate ${iterations}
+
+; 결과 파일은 케이스당 수십 MB라 3,360개 전부 저장하면 디스크가 부족합니다.
+; 경계 사례 분석용으로 필요한 케이스만 아래 줄의 주석(;)을 풀고 --only 로 다시 돌리세요.
+; /file/write-case-data "result.cas.h5"
+
+/file/stop-transcript
+/exit yes

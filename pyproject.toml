@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airfoil-surrogate"
+version = "0.1.0"
+description = "단일 익형 ANSYS Fluent 데이터셋 생성과 CST 기반 CL/CD 회귀 모델"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy", "matplotlib", "gmsh>=4.11"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+ml = ["lightgbm", "torch"]
+
+[project.scripts]
+afs = "airfoil_surrogate.cli:main"
+airfoil-surrogate = "airfoil_surrogate.cli:main"
+
+[tool.setuptools]
+packages = ["airfoil_surrogate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
