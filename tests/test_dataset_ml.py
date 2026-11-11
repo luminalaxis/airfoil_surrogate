@@ -12,7 +12,7 @@ from airfoil_surrogate.cli import main
 from airfoil_surrogate.config import load_config
 from airfoil_surrogate.convergence import ConvergenceConfig, classify, solver_log_info
 from airfoil_surrogate.cst import fit_cst, fit_section, section_stats
-from airfoil_surrogate.dataset import MLConfig, assign_splits
+from airfoil_surrogate.dataset import MLConfig, assign_splits, label_state
 from airfoil_surrogate.geometry import load_section, naca4, normalize
 
 FAKE_SOLVER = Path(__file__).with_name("fake_airfoil_solver.py")
@@ -234,6 +234,36 @@ def make_ml_project(tmp_path):
         tsst_summary = "runs_tsst/summary.csv"
     """), encoding="utf-8")
     return tmp_path / "project.toml"
+
+
+def test_label_state_requires_finished_run():
+    assert label_state("done", "converged") == "converged"
+    assert label_state("done", "oscillating") == "oscillating"
+    assert label_state("failed", "converged") == "no_data"       # 시간 초과 등: 도중까지의 이력
+    assert label_state("running", "oscillating") == "no_data"
+    assert label_state("interrupted", "converged") == "no_data"
+    assert label_state("failed", "diverged") == "diverged"       # 발산은 건수 보고를 위해 유지
+    assert label_state("done", "") == "no_data"
+
+
+def test_dataset_excludes_unfinished_runs(tmp_path, capsys):
+    cfg_path = make_ml_project(tmp_path)
+    assert main(["-c", str(cfg_path), "run"]) == 0
+    runs = tmp_path / "runs"
+    # 시간 초과로 끝난 케이스, 실행 중으로 남은 케이스: 리포트 파일에는 도중까지의 이력이 있음
+    for case, status in (("naca2412_Re200000_a4", {"state": "failed", "message": "시간 초과 (30분)"}),
+                         ("naca0012_Re500000_a8", {"state": "running"})):
+        (runs / case.split("_")[0] / case / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    capsys.readouterr()
+    assert main(["-c", str(cfg_path), "dataset"]) == 0
+    text = capsys.readouterr().out
+    assert "실행이 끝나지 않은" in text and "naca2412_Re200000_a4(failed)" in text
+    rows = list(csv.DictReader((runs / "dataset" / "dataset.csv").open(encoding="utf-8-sig")))
+    cases = {r["case"] for r in rows}
+    assert "naca2412_Re200000_a4" not in cases and "naca0012_Re500000_a8" not in cases
+    assert len(rows) == len(AIRFOILS) * 12 * 2 - 2
+    assert all(r["state"] == "done" or r["conv_state"] == "diverged" for r in rows)
 
 
 def test_dataset_and_training_workflow(tmp_path, capsys):

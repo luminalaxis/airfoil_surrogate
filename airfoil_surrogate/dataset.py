@@ -14,6 +14,11 @@ runs/dataset/ 에 저장한다.
                 나중에 추가된 형상만 새로 배정한다. 다시 섞으려면 --resplit.
   cst_fits.png  피팅 오차가 큰 형상의 원래 좌표와 CST 재구성 비교
 
+정답으로 쓰는 케이스
+  - 실행 상태(state)가 done인 케이스만 수렴 상태를 그대로 쓴다. 시간 초과·오류로 끝났거나(failed),
+    아직 실행 중이거나(running), 중단된(interrupted) 케이스는 리포트 파일에 도중까지의 이력만 있어
+    no_data로 뺀다. 단, 발산(diverged)으로 판정된 케이스는 상태와 관계없이 diverged로 남겨 건수를 보고한다.
+
 분할 규칙
   - 같은 형상의 모든 받음각·Re 케이스는 같은 분할에 들어간다 (형상 단위 분할).
   - holdout_families 계열은 학습·검증에 쓰지 않고 test_ood(처음 보는 형상)로만 쓴다.
@@ -39,6 +44,15 @@ from .results import summarize_case
 DATASET_DIR = "dataset"
 SPLITS = ("train", "val", "test", "test_ood")
 MAX_FIT_ERROR = 0.005  # CST 최대 피팅 오차 경고 기준 [c]
+DONE = "done"
+
+
+def label_state(run_state: str, conv_state: str) -> str:
+    """정답으로 쓸 수렴 상태. 실행이 끝나지 않은(done이 아닌) 케이스는 도중까지의 이력으로 판정된 것이라
+    no_data로 바꾼다. 발산은 실행 상태와 관계없이 diverged로 둔다 (발산하면 Fluent 실행이 failed로 끝난다)."""
+    if conv_state == "diverged" or run_state == DONE:
+        return conv_state or "no_data"
+    return "no_data"
 
 
 @dataclass
@@ -150,8 +164,8 @@ def load_tsst(path: Path, usable: set[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     with path.open(encoding="utf-8-sig", newline="") as f:
         for raw in csv.DictReader(f):
-            state = raw.get("conv_state") or ""
-            if not raw.get("case") or state in ("", "no_data"):
+            state = label_state(raw.get("state") or "", raw.get("conv_state") or "")
+            if not raw.get("case") or state == "no_data":
                 continue
             entry = {"conv_state_tsst": state}
             try:
@@ -231,7 +245,7 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
             warnings.append(f"{sid}: CST 최대 피팅 오차 {feats[f'cst{2 * main_n}_max_err']:.4f}c "
                             "(좌표 점이 성기거나 앞전이 뾰족할 수 있음, cst_fits.png 확인)")
 
-    rows = []
+    rows, unfinished = [], []
     for c in cases:
         r = summarize_case(cfg, c)
         sid = shape_id(c.params, ml)
@@ -246,13 +260,16 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
         row = {
             "case": c.name, "shape": sid, "family": info["family"], "split": info["split"],
             "aoa": aoa, "reynolds": re, "log10_re": math.log10(re),
-            "state": r.get("state", ""), "conv_state": r.get("conv_state", "no_data"),
+            "state": r.get("state", ""),
+            "conv_state": label_state(r.get("state", ""), r.get("conv_state", "no_data")),
             "conv_cl_std": r.get("conv_cl_std", ""), "conv_cd_std": r.get("conv_cd_std", ""),
             "cl": cl, "cd": cd,
             "log10_cd": math.log10(cd) if cd is not None and cd > 0 else None,
             "avg_iters": r.get("avg_iters", ""),
             **yplus_columns(r),
         }
+        if row["conv_state"] == "no_data" and r.get("conv_state") not in (None, "", "no_data"):
+            unfinished.append(f"{c.name}({row['state']})")  # 결과 이력은 있지만 실행이 끝나지 않음
         if cl is None or row["log10_cd"] is None:
             row["conv_state"] = row["conv_state"] if row["conv_state"] == "diverged" else "no_data"
         row.update({k: v for k, v in info.items()
@@ -283,6 +300,10 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
     states: dict[str, int] = {}
     for r in rows:
         states[r["conv_state"]] = states.get(r["conv_state"], 0) + 1
+    if unfinished:
+        warnings.append(f"실행이 끝나지 않은(done이 아닌) 케이스 {len(unfinished)}개는 도중까지의 결과라 정답에서 뺐습니다: "
+                        f"{', '.join(unfinished[:5])}{' 외' if len(unfinished) > 5 else ''} "
+                        "(afs status로 확인, afs run으로 다시 실행)")
     if moved:
         warnings.append(f"분할이 바뀐 형상 {len(moved)}개 (holdout_families 변경 등): {', '.join(moved[:5])}")
     return {"dir": out_dir, "rows": labeled, "counts": counts, "states": states,

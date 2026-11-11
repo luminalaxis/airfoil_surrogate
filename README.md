@@ -113,6 +113,7 @@ afs edge-cases          # 경계 사례 10개 + 사례별 그래프 → runs/ml/
 
 - **결과값(정답)**: 마지막 `[results] average_last`(예제: 200)개 반복의 평균입니다. 진동 케이스는 `average_last_oscillating`(예제: 500)개로 더 길게 평균합니다(기획서 라벨 규칙). 실제로 평균에 쓴 반복 수는 `avg_iters` 열에 남습니다.
 - **y+**: 베이스 케이스의 리포트 `yplus-max`(벽면 y+ 최대), `yplus-avg`(면적 가중 평균)를 같은 리포트 파일에 넣으면 `summary.csv`의 `yplus-max`, `yplus-avg`와 `dataset.csv`의 `yplus_max`, `yplus_avg`로 기록됩니다([docs/FLUENT_BASE_CASE_AIRFOIL.md](docs/FLUENT_BASE_CASE_AIRFOIL.md) 9단계). `dataset`이 중앙값과 최대를 출력하고, 리포트가 없으면 경고합니다.
+- **끝나지 않은 실행**: `dataset`은 실행 상태(`state`)가 `done`인 케이스만 정답으로 씁니다. 시간 초과·오류로 끝났거나(`failed`), 실행 중이거나(`running`), 중단된(`interrupted`) 케이스는 리포트 파일에 도중까지의 이력만 있으므로 `no_data`로 빼고 경고에 케이스 이름을 보여 줍니다. 발산으로 판정된 케이스는 실행 상태와 관계없이 `diverged`로 남깁니다.
 - **발산**: `dataset`이 상태별 건수를 출력하고, `train`은 발산 케이스를 학습·평가에서 빼고 분할별 건수만 `metrics.csv`(`state=diverged`)에 남깁니다.
 
 ## 데이터셋 (`afs dataset` → `runs/dataset/`)
