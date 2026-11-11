@@ -51,7 +51,7 @@ box_upstream = 20            # 앞전 ~ inlet(앞 경계) [c]
 box_downstream = 40          # 앞전 ~ outlet(뒤 경계) [c]
 box_height = 20              # 시위선 ~ 위·아래 경계 [c] (전체 높이 40c)
 box_far_size = 2.0           # 바깥 경계 셀 크기 [c]
-                             # 경계: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall → Fluent에서 미끄럼 벽), 뒤 = outlet(pressure-outlet)
+                             # 경계: 앞 = inlet, 위·아래 = top·bottom (셋 다 velocity-inlet, 같은 기울어진 자유류), 뒤 = outlet(pressure-outlet)
 y_plus = 1.0
 growth_rate = 1.15
 surface_cells = 200

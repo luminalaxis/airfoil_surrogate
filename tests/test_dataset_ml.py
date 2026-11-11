@@ -159,12 +159,12 @@ def test_box_enclosure_mesh(tmp_path):
                     "box_far_size": 1.0, "surface_cells": 80, "near_size": 0.03, "wake_size": 0.03}, tmp_path)
     info = generate_mesh(job, tmp_path)
     assert set(info["zones"]) == {"interior-fluid", "main", "inlet", "outlet", "top", "bottom"}
-    # 앞 변만 inlet, 위·아래 변은 wall (top/bottom), 뒤 변은 outlet
+    # 앞 변 inlet, 위·아래 변 top/bottom (셋 다 velocity-inlet: 기울어진 자유류), 뒤 변은 outlet
     msh = read_msh(job.mesh_file)
     nodes = msh["nodes"]
     zone = {name: (zid, bc) for zid, (bc, name) in msh["names"].items()}
-    for name, bc, axis, pos in (("inlet", "velocity-inlet", 0, -10), ("top", "wall", 1, 8),
-                                ("bottom", "wall", 1, -8), ("outlet", "pressure-outlet", 0, 20)):
+    for name, bc, axis, pos in (("inlet", "velocity-inlet", 0, -10), ("top", "velocity-inlet", 1, 8),
+                                ("bottom", "velocity-inlet", 1, -8), ("outlet", "pressure-outlet", 0, 20)):
         zid, zone_bc = zone[name]
         assert zone_bc == bc
         pts = np.array([nodes[n - 1] for f in msh["zones"][zid] for n in msh["faces"][f][:2]])
@@ -430,7 +430,10 @@ def test_mesh_fingerprint_unchanged_by_new_settings(tmp_path):
     assert make_job(AIRFOIL_PARAMS, {"timeout": 10}, tmp_path).fingerprint() == fp
     assert make_job(AIRFOIL_PARAMS, {"farfield_shape": "circle", "box_height": 20}, tmp_path).fingerprint() == fp
     assert make_job(AIRFOIL_PARAMS, {"farfield_split": True}, tmp_path).fingerprint() == "eea950de090f"
-    assert make_job(AIRFOIL_PARAMS, {"farfield_shape": "box"}, tmp_path).fingerprint() == "6e17fa42aeec"
+    # box는 위·아래 경계 타입을 바꿀 때마다 지문이 바뀌어 예전 메쉬를 다시 만든다 (지금: top/bottom = velocity-inlet)
+    box = make_job(AIRFOIL_PARAMS, {"farfield_shape": "box"}, tmp_path).fingerprint()
+    assert box == "d72092188170"
+    assert box != "6e17fa42aeec"  # 위·아래가 wall이던 box 메쉬의 지문
 
 
 def test_cusp_trailing_edge_is_opened(tmp_path):

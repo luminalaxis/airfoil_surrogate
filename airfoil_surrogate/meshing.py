@@ -45,8 +45,8 @@ class MeshSettings:
     farfield_size: float = 5.0    # (circle) 원거리 경계 셀 크기 [c]
     farfield_split: bool = False  # (circle) true면 앞쪽 반원 inlet(velocity-inlet) +
                                   # 뒤쪽 반원 outlet(pressure-outlet)으로 나눔 (밀도 일정 비압축 해석용)
-    # (box) 직사각형 인클로저: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall,
-    #       Fluent에서 미끄럼 벽 = Specified Shear 0), 뒤 = outlet(pressure-outlet)
+    # (box) 직사각형 인클로저: 앞 = inlet, 위·아래 = top·bottom(셋 다 velocity-inlet, 같은 자유류 속도),
+    #       뒤 = outlet(pressure-outlet). 받음각은 유입 속도 방향으로 준다
     box_upstream: float = 20.0    # 앞전 ~ inlet(앞 경계) 거리 [c]
     box_downstream: float = 40.0  # 앞전 ~ outlet(뒤 경계) 거리 [c]
     box_height: float = 20.0      # 시위선 ~ 위쪽/아래쪽 경계 거리 [c] (전체 높이는 2배)
@@ -117,8 +117,9 @@ class MeshJob:
             if settings.get(key) == default:
                 settings.pop(key)
         if settings.get("farfield_shape") == "box":
-            # box 위·아래 경계를 inlet → wall(top/bottom)로 바꾼 뒤의 메쉬. 예전 box 메쉬는 다시 만든다
-            settings["box_bc"] = "top_bottom_wall"
+            # box 위·아래 경계(top/bottom)를 velocity-inlet으로 둔 메쉬. 위·아래가 wall이던 예전 box 메쉬는
+            # 다시 만든다 (메쉬 파일의 경계 타입이 다름)
+            settings["box_bc"] = "top_bottom_velocity_inlet"
         payload = json.dumps([self.geometry_params, settings], sort_keys=True, default=str)
         return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
@@ -201,8 +202,10 @@ def _build_gmsh_model(geom: Geometry, s: MeshSettings, bl_thickness: float):
     loops = [geo.addCurveLoop(c) for c in walls.values()]
 
     if s.farfield_shape == "box":
-        # 자유류 직사각형 인클로저: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall,
-        # Fluent 베이스 케이스에서 미끄럼 벽 = Specified Shear 0으로 설정), 뒤 = outlet(pressure-outlet)
+        # 자유류 직사각형 인클로저: 앞 = inlet, 위·아래 = top·bottom (셋 다 velocity-inlet), 뒤 = outlet(pressure-outlet).
+        # 받음각은 유입 속도 방향으로 주므로 위·아래 경계에도 같은 기울어진 자유류를 준다. 위·아래를 수평 벽으로 두면
+        # 유동이 벽을 따라 수평으로 꺾여 익형 위치의 실제 받음각이 지정값보다 작아진다.
+        # 이름은 inlet과 따로 두어 Fluent에서 위·아래만 다르게 설정할 수도 있게 한다
         far_size = s.box_far_size / f
         grow = 0.5 * min(s.box_upstream, s.box_height)
         x0, x1 = -s.box_upstream, s.box_downstream
@@ -210,8 +213,8 @@ def _build_gmsh_model(geom: Geometry, s: MeshSettings, bl_thickness: float):
         c = [geo.addPoint(x, y, 0, lc) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
         bottom, right, top, left = (geo.addLine(c[i], c[(i + 1) % 4]) for i in range(4))
         outer_loop = geo.addCurveLoop([bottom, right, top, left])
-        outer = {"inlet": ([left], "velocity-inlet"), "top": ([top], "wall"),
-                 "bottom": ([bottom], "wall"), "outlet": ([right], "pressure-outlet")}
+        outer = {"inlet": ([left], "velocity-inlet"), "top": ([top], "velocity-inlet"),
+                 "bottom": ([bottom], "velocity-inlet"), "outlet": ([right], "pressure-outlet")}
     else:
         # 자유류: 원형 원거리 경계 하나 (pressure-far-field)
         R = s.farfield_radius

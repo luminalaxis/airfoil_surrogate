@@ -32,8 +32,8 @@ Fluent Launcher: Dimension **2D**, **Double Precision**, Solver Processes 4, Wor
 | 경계 | 타입 | 위치 |
 |---|---|---|
 | `inlet` | velocity-inlet | 직사각형의 앞 변 |
-| `top` | wall (미끄럼 벽) | 직사각형의 위 변 |
-| `bottom` | wall (미끄럼 벽) | 직사각형의 아래 변 |
+| `top` | velocity-inlet | 직사각형의 위 변 |
+| `bottom` | velocity-inlet | 직사각형의 아래 변 |
 | `outlet` | pressure-outlet | 직사각형의 뒤 변 |
 | `main` | wall | 익형 |
 | `interior-fluid` | interior | |
@@ -77,12 +77,18 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 ### `outlet` (pressure-outlet)
 - Gauge Pressure 0, Backflow 난류 값은 inlet과 같게
 
-### `top`, `bottom` (wall, 미끄럼 벽)
-- 직사각형의 위·아래 변. 두 경계를 함께 선택해 한 번에 설정할 수 있습니다.
-- Momentum 탭: Wall Motion **Stationary Wall**, Shear Condition **Specified Shear**, Shear Stress X = **0**, Y = **0** [Pa]
-- 기본값(No Slip)으로 두면 바깥 경계를 따라 경계층이 자라서 유동이 막히므로 반드시 바꿉니다.
-- 확인: `/define/boundary-conditions/list-zones`에서 `top`, `bottom`이 wall이고, 경계 설정 창의 Shear Condition이 Specified Shear인지 봅니다.
-- 위·아래가 벽이라 받음각만큼 기울어진 유입이 위·아래 변에서 수평으로 꺾입니다. 영역 높이(`box_height`, 기본 ±20c)가 충분히 커서 익형 주변의 받음각 영향은 작지만, 파일럿 실행에서 높은 받음각의 cl을 실측값과 비교해 확인하세요.
+### `top`, `bottom` (velocity-inlet, inlet과 같은 자유류)
+- 직사각형의 위·아래 변. 두 경계를 함께 선택해 한 번에 설정할 수 있고, 설정은 `inlet`과 **똑같이** 합니다.
+- Velocity Specification Method **Components**, X-Velocity `speed * cos(alpha)`, Y-Velocity `speed * sin(alpha)`
+- Turbulence: inlet과 같게 (Intensity 0.1 %, Viscosity Ratio 10)
+- 왜 벽이 아닌가: 받음각을 유입 속도 방향으로 주기 때문에, 위·아래를 수평 벽(미끄럼 벽 포함)으로 두면 기울어진 유입이
+  벽을 따라 수평으로 꺾여 익형 위치의 실제 받음각이 지정값보다 작아지고 CL이 체계적으로 작게 나옵니다.
+  위·아래에도 같은 자유류를 주면 영역 전체가 받음각만큼 기울어진 자유류가 됩니다.
+- 받음각이 양수면 위 변(음수면 아래 변)으로는 유동이 빠져나가는데, 속도를 정해 준 경계라 비압축 해석에서는 문제없습니다.
+  질량 차이는 `outlet`(pressure-outlet)이 맞춥니다.
+- 확인: `/define/boundary-conditions/list-zones`에서 `inlet`, `top`, `bottom`이 모두 velocity-inlet인지 봅니다.
+  메쉬 파일에 이미 velocity-inlet으로 들어 있으므로 타입은 바꿀 필요 없고, 속도·난류 값만 넣으면 됩니다.
+- 파일럿 실행에서 NACA 0012의 cl이 기대값(12단계)과 맞는지 확인하세요.
 
 ### `main` (wall)
 - Stationary Wall, No Slip (기본값)
