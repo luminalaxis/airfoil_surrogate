@@ -34,7 +34,93 @@ numpy, matplotlib, gmsh가 함께 설치됩니다. gmsh는 pip 패키지에 실�
 pip install -e ".[ml]"
 ```
 
+Airfoil2Vec 검증(`afs validate airfoil2vec`)에는 parquet 읽기와 Hugging Face 다운로드용 패키지가 필요합니다. XFOIL 비교에는 `xfoil` 실행 파일이 PATH에 있거나 `[validation.xfoil] executable`에 경로를 지정해야 합니다.
+
+```bash
+pip install -e ".[validation]"
+```
+
 명령은 `afs`(긴 이름 `airfoil-surrogate`도 같음)입니다. 터미널에서 실행하면 큰 글씨 로고 배너가 나오고(색 조합은 실행할 때마다 무작위), 화면을 먼저 지웁니다. 배너는 `--no-banner` 또는 `AFS_NO_BANNER=1`, 화면 지우기는 `--no-clear` 또는 `AFS_NO_CLEAR=1`, 색은 `NO_COLOR=1`로 끕니다. 파일·파이프로 출력을 넘기면 배너·색·화면 지우기가 자동으로 빠집니다.
+
+## 팀 파이프라인: NACA (m, p, t, α) 라틴 하이퍼큐브 (`examples/naca_lhs`)
+
+4명이 **설정 파일 하나**(`examples/naca_lhs/project.toml`)로 같은 조건을 돌리는 본 데이터 생성 파이프라인입니다. 베이스 케이스는 [docs/FLUENT_BASE_CASE_NACA_LHS.md](docs/FLUENT_BASE_CASE_NACA_LHS.md).
+
+```bash
+cd examples/naca_lhs
+```
+
+```bash
+afs make-cases
+```
+
+```bash
+afs run --assignee member1
+```
+
+```bash
+afs merge-results results_all.csv member1/results.csv member2/results.csv member3/results.csv member4/results.csv
+```
+
+```bash
+afs dataset
+```
+
+```bash
+afs train --features mpt
+```
+
+모드는 설정의 `[flow]`에서 정하고, 명령줄에서 덮어쓸 수 있습니다. 결과는 모드마다 `runs/<re_mode>_<난류 모델>_<메쉬 모드>_<케이스 목록>/`에 따로 쌓이고, 메쉬는 `runs/_meshes/`에서 난류 모델끼리 공유합니다.
+
+| 옵션 | 값 |
+|---|---|
+| `--re-mode` | `production` (Re 10⁵, c = 0.1 m, U = 14.6 m/s, y⁺ ≈ 1) / `validation` (Re 4.66×10⁶, c = 1 m, y⁺ ≈ 50, 뒷전 sharp) |
+| `--mesh-mode` | `light` (본 데이터, 약 2만 셀) / `fine` (검증, 약 8만 셀). `[mesh.light]`, `[mesh.fine]` |
+| `--turb` | `kOmegaSST` (Fluent SST k-ω) / `kOmegaSSTLM` (Fluent Transition SST) → `[flow] base_cases`의 베이스 케이스 |
+| `--case-list` | `main` (`cases.csv`) / `validation` (`cases_validation.csv`, validation Re 모드의 기본값) |
+| `--assignee` | `cases.csv`의 담당자 열로 내 케이스만 (형상 단위로 배정돼 메쉬도 한 사람만 만듦) |
+
+### 명세 항목 → 구현
+
+| § | 항목 | 구현 |
+|---|---|---|
+| 0 | U, ν, Re 분리 | `[flow]` chord, nu, rho + 모드별 `velocity` 또는 `reynolds`(나머지는 계산). 두 값을 함께 주면 오류 |
+| 0 | 하드코딩 제거 | 물리 조건·모드·k/ω·기준값·베이스 케이스가 `[flow]` 하나에서 저널(`${...}`)과 메쉬로 전달. `[constants]`와 겹치면 오류 |
+| 1 | 뒷전 sharp/blunt | `naca_te` = sharp(−0.1036) / blunt(−0.1015). validation 기본 sharp |
+| 1 | 코사인 분포 | `geometry.naca4_mpt` |
+| 1 | (m, p, t) 실수 입력 | 케이스 변수 `m`, `p`, `t` (NACA 자리 단위: 2412 = 2, 4, 12) |
+| 1 | p = 0 예외 | m = 0 또는 p = 0 → 대칭익 (캠버 식 계산 안 함). m > 0인데 p = 0이면 명확한 오류 |
+| 2 | LHS (m, p, t, α) | `afs make-cases`: `nested`(형상 LHS × 형상마다 α 층화, 기본) / `joint`(4차원 LHS). 범위 m 0~6, p 2~6, t 6~18, α 0~12 (15° 포함은 `[sampling] alpha`로 결정) |
+| 2 | 시드 고정 | `[sampling] seed`. 같은 설정이면 같은 파일, 내용이 다른 기존 파일은 `--force` 없이 덮어쓰지 않음 |
+| 2 | cases.csv | `case_id, shape_id, m, p, t, alpha, assignee` (+ `cases.meta.json`) |
+| 2 | 검증 목록 분리 | `cases_validation.csv`: `[sampling.validation]` 형상 6개 × α {0, 4, 8} |
+| 3 | 첫 셀 높이 자동 | Re와 목표 y⁺(`[flow.*] y_plus`)로 계산 |
+| 3 | light / fine | `[mesh.light]`, `[mesh.fine]` 프리셋 |
+| 3 | 형상당 메쉬 1회 | 메쉬 이름 = `shape_id` + Re·메쉬 모드 꼬리표. α는 유입 방향 |
+| 3 | checkMesh 판정 | `mesh_info.json`: 최대 종횡비, 최대·평균 비직교성(OpenFOAM 정의), 최소 직교 품질 → `quality_flag` (`[mesh] max_aspect_ratio` 등). Fluent `/mesh/quality` 출력도 파싱 |
+| 3 | 격자 독립성 3~4단계 | `mesh_level` 스윕 + `afs gci` (가장 조밀한 3단계로 GCI, 4단계면 나머지도 `levels` 열에 기록) |
+| 4 | 유입 (U cos α, U sin α) | Named Expression `speed`, `alpha` |
+| 4 | liftDir/dragDir 회전 | 물체축 `cx`, `cy`를 유입과 같은 α로 회전 (방향 누락 버그가 생길 수 없음). 고정 방향 `cl/cd` 리포트가 있으면 비교해 `force_dir_check = mismatch` |
+| 4 | Aref, lRef, U 연동 | 저널이 케이스마다 Area = c × span, Length = c, Depth = span, Velocity, Density, Viscosity 갱신 |
+| 4 | k, ω 자동 | `k = 1.5 (U I)²`, `ω = √k / (Cμ^¼ l)`, I = 1%, l = 1% c → `k_in`, `omega_in` |
+| 4 | SST-LM | 별도 베이스 케이스 + `intermittency_in`(γ). Re_θt는 Langtry–Menter 상관식으로 계산해 기록 (Fluent는 유입 Tu에서 내부 계산) |
+| 4 | 벽 경계조건 전환 | Fluent k-ω SST는 y⁺-무관 벽 처리라 메쉬 y⁺로 전환. `wall_treatment`와 y⁺·난류 모델 조합을 설정에서 검사 |
+| 5 | 담당 케이스만 | `--assignee` |
+| 5 | 타임아웃·최대 반복 | `[solver] timeout_minutes`, `[flow] iterations` |
+| 5 | 재실행 시 건너뛰기 | 완료(`status.json` done) 케이스 건너뜀 |
+| 5 | 로그·소요 시간 | 케이스별 `solver.log`, `transcript.txt`, `status.json` + 결과 폴더의 `run_log.csv` |
+| 6 | 마지막 N회 평균 | CL, CD, CM = 마지막 `average_last`회 평균 |
+| 6 | 수렴 기준 두 가지 | 잔차 ≤ `residual_tol` (`conv_res_ok`), CL·CD 변동 ≤ 허용치 (`conv_coef_ok`), `criteria = "both"` |
+| 6 | converged 플래그 | `converged = False`도 행을 지우지 않고 기록 |
+| 6 | y⁺ 최대·평균 | `yplus_max`, `yplus_mean` |
+| 6 | Cp 보간 | `[results] cp_stations` → `cp_u_<x/c>`, `cp_l_<x/c>` |
+| 7 | 결과 스키마 | `results.csv` 열 고정 (`results.RESULT_COLUMNS`), `afs merge-results`가 열·중복 확인 |
+| 8 | Airfoil2Vec | `afs validate airfoil2vec`: metadata 파일만(로컬 또는 HF `hf_hub_download`), inverted −α와 부호 변환 비교, CL ±3%·CD ±10% 판정, light vs fine 오차 |
+| 8 | XFOIL | `afs validate xfoil`: subprocess, 같은 Re, Ncrit 9 → SST / SST-LM 비교와 추천 |
+| 9 | (m, p, t, α) 입력 | `afs train --features mpt` |
+| 9 | 형상 단위 분할 | `[ml] shape_key = "shape_id"` |
+| 9 | 미수렴 제외 | `[ml] require_converged = true` |
+| 9 | 정규화 | MLP 입력·출력 표준화, 목표 `log10_cd` |
 
 ## 예제 구성
 

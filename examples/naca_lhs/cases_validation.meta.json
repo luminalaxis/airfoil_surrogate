@@ -1,0 +1,51 @@
+{
+  "generator": "afs make-cases",
+  "sampling": {
+    "seed": 2026,
+    "mode": "nested",
+    "n_shapes": 120,
+    "alpha_per_shape": 6,
+    "n_cases": 720,
+    "m": [
+      0.0,
+      6.0
+    ],
+    "p": [
+      2.0,
+      6.0
+    ],
+    "t": [
+      6.0,
+      18.0
+    ],
+    "alpha": [
+      0.0,
+      12.0
+    ],
+    "assignees": [
+      "member1",
+      "member2",
+      "member3",
+      "member4"
+    ],
+    "decimals": 4,
+    "validation": {
+      "shapes": [
+        "0012",
+        "2412",
+        "4412",
+        "0015",
+        "2415",
+        "4415"
+      ],
+      "alpha": [
+        0,
+        4,
+        8
+      ]
+    }
+  },
+  "list": "csv_validation",
+  "n_cases": 18,
+  "n_shapes": 6
+}

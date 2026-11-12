@@ -1,5 +1,6 @@
-"""메쉬 독립성(격자 수렴) 확인: 같은 케이스를 메쉬 3단계(케이스 변수 mesh_level)로 풀어 Richardson 외삽과
-GCI(Grid Convergence Index)를 계산한다.
+"""메쉬 독립성(격자 수렴) 확인: 같은 케이스를 메쉬 3~4단계(케이스 변수 mesh_level)로 풀어 Richardson 외삽과
+GCI(Grid Convergence Index)를 계산한다. 4단계 이상이면 가장 조밀한 3단계로 GCI를 계산하고, 나머지 단계 값과
+셀 수도 levels 열(셀 수:값, 조밀 → 성김)에 함께 남긴다.
 
 절차: Celik et al. (2008), "Procedure for Estimation and Reporting of Uncertainty Due to Discretization
 in CFD Applications", J. Fluids Eng. 130(7), 078001.
@@ -144,6 +145,7 @@ def mesh_study(cfg: ProjectConfig, cases: list[Case], quantities: list[str] | No
             if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals):
                 continue
             g = gci3(tuple(vals), h)
+            all_levels = "; ".join(f"{r['_cells']}:{r.get(q)}" for r in levels)
             results.append({
                 "group": label, "quantity": q,
                 "level_fine": fine.get(LEVEL_KEY), "level_medium": medium.get(LEVEL_KEY),
@@ -153,6 +155,7 @@ def mesh_study(cfg: ProjectConfig, cases: list[Case], quantities: list[str] | No
                 "conv_state_fine": fine.get("conv_state", ""), "conv_state_medium": medium.get("conv_state", ""),
                 "conv_state_coarse": coarse.get("conv_state", ""), **g,
                 "case_medium": medium["case"],
+                "n_levels": len(levels), "levels": all_levels,
             })
     out = cfg.output_dir / STUDY_DIR
     out.mkdir(parents=True, exist_ok=True)

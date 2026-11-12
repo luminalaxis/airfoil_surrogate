@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import ConfigError, ProjectConfig, safe_name
 from .expr import evaluate
+from .geometry import has_geometry
 from .meshing import MeshJob, make_job, mesh_name
 
 
@@ -121,16 +122,16 @@ def _attach_meshes(cases: list[Case], cfg: ProjectConfig) -> None:
     케이스 변수 reynolds가 형상 안에서 다르면(예: 속도 스윕) 가장 큰 값으로 첫 셀 높이를 잡아
     모든 조건에서 y+ 가 목표 이하가 되게 한다.
     """
-    meshes_dir = cfg.output_dir / "_meshes"
+    meshes_dir = cfg.meshes_dir
     max_re: dict[str, float] = {}
     for c in cases:
-        if "reynolds" in c.params and "main_airfoil" in c.params:
+        if "reynolds" in c.params and has_geometry(c.params):
             key = mesh_name(c.params)
             max_re[key] = max(max_re.get(key, 0.0), float(c.params["reynolds"]))
     first: dict[str, Case] = {}
     for c in cases:
         params = c.params
-        if "reynolds" in params and "main_airfoil" in params:
+        if "reynolds" in params and has_geometry(params):
             key = mesh_name(params)
             params = {**params, "reynolds": max_re[key]}
         c.mesh = make_job(params, cfg.mesh, meshes_dir)
@@ -155,6 +156,19 @@ def filter_cases(cases: list[Case], patterns: list[str] | None) -> list[Case]:
         c for c in cases
         if any(fnmatch(c.name, p) or fnmatch(c.group, p) for p in patterns)
     ]
+
+
+def filter_assignee(cases: list[Case], assignees: list[str] | None) -> list[Case]:
+    """--assignee 옵션: cases.csv의 assignee(담당자) 열이 일치하는 케이스만."""
+    if not assignees:
+        return cases
+    if not any("assignee" in c.params for c in cases):
+        raise ConfigError("--assignee: 케이스에 assignee 열이 없습니다 (afs make-cases로 만든 cases.csv를 쓰세요).")
+    known = sorted({str(c.params.get("assignee", "")) for c in cases})
+    unknown = [a for a in assignees if a not in known]
+    if unknown:
+        raise ConfigError(f"--assignee {', '.join(unknown)}: cases.csv에 없는 담당자입니다 (있는 담당자: {', '.join(known)}).")
+    return [c for c in cases if str(c.params.get("assignee", "")) in assignees]
 
 
 def partition_cases(cases: list[Case], part: str | None) -> list[Case]:

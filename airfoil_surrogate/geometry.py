@@ -3,8 +3,11 @@
 좌표계: 코드 = 1, 앞전 = 원점, x는 뒷전 방향 (내부 계산은 코드 기준 무차원).
 점 순서는 Selig 형식(뒷전 윗면 → 앞전 → 뒷전 아랫면)으로 통일한다.
 
-입력 변수:
+입력 변수 (둘 중 하나):
+  - m, p, t      : NACA 4자리 실수 파라미터 (라틴 하이퍼큐브 샘플링용). 단위는 NACA 자리수와 같다:
+                   m = 최대 캠버 [% c], p = 최대 캠버 위치 [c/10], t = 최대 두께 [% c].  NACA 2412 = (2, 4, 12)
   - main_airfoil : NACA 4자리 코드(예: "2412") 또는 좌표 파일 경로
+  - naca_te      : (선택) NACA 뒷전 sharp (a4 = −0.1036, 닫힘) / blunt (a4 = −0.1015, 표준식, 기본값)
   - main_chord   : (선택) 코드 길이. 메쉬는 코드 기준 무차원으로 만들고 [mesh] chord로 스케일한다
 """
 
@@ -53,28 +56,57 @@ class Geometry:
 
 # ---------------------------------------------------------------- 단면 생성
 
-def naca4(code: str, n: int = 160, closed_te: bool = False) -> np.ndarray:
-    """NACA 4자리 좌표 (Selig 순서). closed_te=False면 표준 식(뭉툭한 뒷전)."""
-    if not re.fullmatch(r"\d{4}", code):
-        raise ConfigError(f"NACA 4자리 코드가 아닙니다: {code!r}")
-    m, p, t = int(code[0]) / 100, int(code[1]) / 10, int(code[2:]) / 100
+TE_COEFFICIENT = {"sharp": -0.1036, "blunt": -0.1015}  # NACA 두께식 마지막 계수
+
+
+def naca4_mpt(m: float, p: float, t: float, n: int = 160, te: str = "blunt") -> np.ndarray:
+    """NACA 4자리 좌표 (Selig 순서), 실수 파라미터.
+
+    m: 최대 캠버 [% c], p: 최대 캠버 위치 [c/10], t: 최대 두께 [% c] (NACA 2412 = 2, 4, 12).
+    te: "sharp"(a4 = −0.1036, 뒷전이 닫힘) / "blunt"(a4 = −0.1015, 표준식).
+    점은 코사인 분포로 앞전·뒷전에 모은다. m = 0 또는 p = 0이면 대칭익(캠버선 0)으로 처리해
+    캠버 식의 m/p², m/(1−p)² 에서 0으로 나누지 않는다.
+    """
+    if te not in TE_COEFFICIENT:
+        raise ConfigError(f"뒷전 형상은 'sharp' 또는 'blunt'여야 합니다: {te!r}")
+    m, p, t = float(m) / 100, float(p) / 10, float(t) / 100
+    if not 0 < t < 0.5:
+        raise ConfigError(f"두께 t는 0~50% 사이여야 합니다: {100 * t:g}")
+    if m < 0:
+        raise ConfigError(f"캠버 m은 0 이상이어야 합니다: {100 * m:g}")
+    symmetric = m == 0 or p == 0
+    if m > 0 and p == 0:
+        raise ConfigError(f"캠버가 있는데(m = {100 * m:g}%) 최대 캠버 위치 p가 0입니다. 대칭익이면 m = 0으로 주세요.")
+    if not symmetric and not 0 < p < 1:
+        raise ConfigError(f"최대 캠버 위치 p는 0~10 (c/10 단위) 사이여야 합니다: {10 * p:g}")
     beta = np.linspace(0, np.pi, n)
-    x = 0.5 * (1 - np.cos(beta))  # 앞전/뒷전 집중 분포
-    a4 = -0.1036 if closed_te else -0.1015
-    yt = 5 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 + a4 * x**4)
-    if m > 0 and p > 0:
-        yc = np.where(x < p, m / p**2 * (2 * p * x - x**2), m / (1 - p) ** 2 * (1 - 2 * p + 2 * p * x - x**2))
-        dyc = np.where(x < p, 2 * m / p**2 * (p - x), 2 * m / (1 - p) ** 2 * (p - x))
-    else:
+    x = 0.5 * (1 - np.cos(beta))  # 코사인 분포: 앞전/뒷전 집중
+    yt = 5 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 + TE_COEFFICIENT[te] * x**4)
+    if symmetric:
         yc = np.zeros_like(x)
         dyc = np.zeros_like(x)
+    else:
+        yc = np.where(x < p, m / p**2 * (2 * p * x - x**2), m / (1 - p) ** 2 * (1 - 2 * p + 2 * p * x - x**2))
+        dyc = np.where(x < p, 2 * m / p**2 * (p - x), 2 * m / (1 - p) ** 2 * (p - x))
     th = np.arctan(dyc)
     upper = np.column_stack([x - yt * np.sin(th), yc + yt * np.cos(th)])
     lower = np.column_stack([x + yt * np.sin(th), yc - yt * np.cos(th)])
     xy = np.vstack([upper[::-1], lower[1:]])
-    if closed_te:
-        xy[-1] = xy[0]
+    if te == "sharp":
+        xy[-1] = xy[0] = 0.5 * (xy[0] + xy[-1])  # 반올림 오차(~1e-17)까지 정확히 닫음
     return xy
+
+
+def naca4(code: str, n: int = 160, closed_te: bool = False) -> np.ndarray:
+    """NACA 4자리 코드 문자열 (예: "2412"). closed_te=True면 뾰족한 뒷전."""
+    if not re.fullmatch(r"\d{4}", code):
+        raise ConfigError(f"NACA 4자리 코드가 아닙니다: {code!r}")
+    return naca4_mpt(int(code[0]), int(code[1]), int(code[2:]), n, "sharp" if closed_te else "blunt")
+
+
+def naca_code(m: float, p: float, t: float) -> str:
+    """(m, p, t) → 가장 가까운 NACA 4자리 코드 (검증 데이터와 이름 맞추기용)."""
+    return f"{round(float(m)):d}{round(float(p)):d}{round(float(t)):02d}"
 
 
 def read_airfoil_file(path: Path) -> np.ndarray:
@@ -159,10 +191,15 @@ def open_cusp_te(xy: np.ndarray, le_idx: int, max_pairs: int = 3) -> tuple[np.nd
     return xy, le_idx
 
 
-def load_section(spec, root: Path, name: str) -> Element:
+def load_section(spec, root: Path, name: str, te: str = "blunt") -> Element:
     spec = str(spec).strip()
     code = spec.upper().removeprefix("NACA").strip()
-    xy = naca4(code) if re.fullmatch(r"\d{4}", code) else read_airfoil_file((root / spec).resolve())
+    xy = naca4(code, closed_te=te == "sharp") if re.fullmatch(r"\d{4}", code) \
+        else read_airfoil_file((root / spec).resolve())
+    return _element(xy, name)
+
+
+def _element(xy: np.ndarray, name: str) -> Element:
     xy, le_idx = normalize(xy)
     xy, le_idx = open_cusp_te(close_tiny_te_gap(xy), le_idx)
     return Element(name, xy, le_idx)
@@ -210,16 +247,43 @@ def body_clearance(a: np.ndarray, b: np.ndarray) -> float:
 
 # ---------------------------------------------------------------- 형상 조립
 
-GEOMETRY_KEYS = ("main_airfoil", "main_chord", "chord")
+GEOMETRY_KEYS = ("main_airfoil", "m", "p", "t", "naca_te", "main_chord", "chord")
+NACA_PARAM_KEYS = ("m", "p", "t")
 
 
 def geometry_params(params: dict) -> dict:
     """케이스 변수 중 형상(메쉬)을 결정하는 것만 추린다."""
-    return {k: params[k] for k in GEOMETRY_KEYS if k in params and params[k] not in ("", None)}
+    out = {k: params[k] for k in GEOMETRY_KEYS if k in params and params[k] not in ("", None)}
+    if all(k in out for k in NACA_PARAM_KEYS):
+        out.pop("main_airfoil", None)  # (m, p, t)가 있으면 그것이 형상
+    if "naca_te" in out and not _is_naca(out):
+        out.pop("naca_te")             # 좌표 파일 형상에는 의미 없음
+    return out
+
+
+def _is_naca(params: dict) -> bool:
+    if all(k in params for k in NACA_PARAM_KEYS):
+        return True
+    spec = str(params.get("main_airfoil", "")).upper().removeprefix("NACA").strip()
+    return bool(re.fullmatch(r"\d{4}", spec))
+
+
+def has_geometry(params: dict) -> bool:
+    return "main_airfoil" in params or all(k in params for k in NACA_PARAM_KEYS)
+
+
+def section_from_params(params: dict, root: Path, name: str = "main") -> Element:
+    """케이스 변수에서 단면: (m, p, t) 실수 파라미터 또는 main_airfoil (NACA 코드/좌표 파일)."""
+    te = str(params.get("naca_te") or "blunt")
+    if all(k in params and params[k] not in ("", None) for k in NACA_PARAM_KEYS):
+        return _element(naca4_mpt(params["m"], params["p"], params["t"], te=te), name)
+    if "main_airfoil" not in params:
+        raise ConfigError("형상 변수가 없습니다: (m, p, t) 또는 main_airfoil 을 지정하세요.")
+    return load_section(params["main_airfoil"], root, name, te=te)
 
 
 def build_geometry(params: dict, root: Path) -> Geometry:
     """단일 익형 형상 (요소 1개: main)."""
-    main = load_section(params["main_airfoil"], root, "main")
+    main = section_from_params(params, root, "main")
     info = {"elements": 1, "main_chord": float(params.get("main_chord", 1.0))}
     return Geometry([main], info)

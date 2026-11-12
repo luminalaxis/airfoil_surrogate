@@ -18,7 +18,7 @@ import numpy as np
 
 from .config import ConfigError, safe_name
 from .fluent_msh import Boundary, check_msh, write_msh
-from .geometry import Geometry, build_geometry, geometry_params
+from .geometry import NACA_PARAM_KEYS, Geometry, build_geometry, geometry_params, has_geometry
 
 MESH_FILE = "mesh.msh"
 INFO_FILE = "mesh_info.json"
@@ -55,6 +55,10 @@ class MeshSettings:
     refine: float = 1.0           # 메쉬 전체 세분화 비율 (메쉬 독립성 확인용). 1.5면 모든 셀 크기·첫 셀 높이 ÷1.5,
                                   # 표면 셀 수 ×1.5, 경계층 성장률^(1/1.5). 뒷전 세분화도 같은 비율
     timeout: float = 300.0        # 형상 하나의 메쉬 생성 제한 시간 [s]. 넘으면 그 형상만 실패 처리 (0 = 제한 없음)
+    # 불량 메쉬 판정 (checkMesh에 해당). 넘으면 mesh_info.json의 quality_flag = "bad" (메쉬는 남기고 표시만)
+    max_aspect_ratio: float = 2000.0     # 셀 종횡비(가장 긴 변 / 가장 짧은 변) 최대
+    max_non_orthogonality: float = 70.0  # 비직교성 [deg]: 면 법선과 (셀 중심 → 이웃 셀 중심) 사이 각 최대
+    min_orthogonal_quality: float = 0.05 # Fluent Orthogonal Quality 최소
 
     @classmethod
     def from_dict(cls, data: dict) -> "MeshSettings":
@@ -83,7 +87,8 @@ class MeshSettings:
         return self.growth_rate ** (1 / self.refine)
 
 
-_NOT_IN_FINGERPRINT = ("timeout",)          # 메쉬 결과에 영향 없는 항목
+_NOT_IN_FINGERPRINT = ("timeout", "max_aspect_ratio", "max_non_orthogonality",
+                       "min_orthogonal_quality")  # 메쉬 결과에 영향 없는 항목 (판정 기준만)
 _ADDED_DEFAULTS = {                         # 나중에 추가된 항목과 그 기본값
     "farfield_split": False, "farfield_shape": "circle",
     "box_upstream": 20.0, "box_downstream": 40.0, "box_height": 20.0, "box_far_size": 2.0,
@@ -139,26 +144,51 @@ def _fmt(v) -> str:
 
 
 def mesh_name(params: dict) -> str:
-    """메쉬(형상) 이름. 예: 2412, 2412c300, s1223_c0.3. 케이스 변수 mesh_level이 있으면 끝에 _m<단계>
-    (같은 형상을 메쉬 설정만 바꿔 푸는 메쉬 독립성 확인용)."""
+    """메쉬(형상) 이름. 예: 2412, 2412c300, s1223_c0.3, s017_pro-light.
+
+    (m, p, t) 형상은 케이스 변수 shape_id(없으면 m·p·t 값)로 이름을 짓는다. [flow]가 있으면 끝에
+    Re 모드·메쉬 모드 꼬리표(mesh_tag)를 붙여 y+·셀 수가 다른 메쉬가 섞이지 않게 한다.
+    케이스 변수 mesh_level이 있으면 끝에 _m<단계> (같은 형상을 메쉬 설정만 바꿔 푸는 메쉬 독립성 확인용).
+    """
     p = geometry_params(params)
-    name = _fmt(p["main_airfoil"]) + (f"c{_fmt(p['main_chord'])}" if "main_chord" in p else "")
-    if "main_chord" not in p and "chord" in p:
+    if all(k in p for k in NACA_PARAM_KEYS):
+        sid = params.get("shape_id")
+        name = str(sid) if sid not in (None, "") else "naca_m{:g}_p{:g}_t{:g}".format(*(round(float(p[k]), 4) for k in NACA_PARAM_KEYS))
+        if "main_chord" in p:
+            name += f"c{_fmt(p['main_chord'])}"
+    else:
+        name = _fmt(p["main_airfoil"]) + (f"c{_fmt(p['main_chord'])}" if "main_chord" in p else "")
+    if "main_chord" not in p and "chord" in p and not params.get("mesh_tag"):
         name += f"_c{_fmt(p['chord'])}"
+    if params.get("mesh_tag"):
+        name += f"_{params['mesh_tag']}"
     if params.get("mesh_level") not in (None, ""):
         name += f"_m{_fmt(params['mesh_level'])}"
     return name
 
 
 def make_job(params: dict, mesh_cfg: dict, meshes_dir: Path) -> MeshJob:
-    if "main_airfoil" not in params:
-        raise ConfigError("메쉬 생성에는 main_airfoil 변수가 필요합니다 ([constants] 또는 케이스에 지정).")
+    if not has_geometry(params):
+        raise ConfigError("메쉬 생성에는 형상 변수가 필요합니다: (m, p, t) 또는 main_airfoil "
+                          "([constants] 또는 케이스에 지정).")
     geo = geometry_params(params)
-    # [mesh] 항목과 같은 이름의 케이스 변수가 있으면 케이스 값 사용 (예: reynolds)
+    # [mesh] 항목과 같은 이름의 케이스 변수가 있으면 케이스 값 사용 (예: reynolds, y_plus, chord)
     merged = {**mesh_cfg, **{k: params[k] for k in mesh_cfg.keys() | {f.name for f in fields(MeshSettings)} if k in params}}
     settings = MeshSettings.from_dict(merged)
     name = safe_name(mesh_name(params))
     return MeshJob(name, meshes_dir / name, geo, settings)
+
+
+def quality_flag(check: dict, s: MeshSettings) -> tuple[str, list[str]]:
+    """checkMesh에 해당하는 판정: (ok / bad, 이유 목록)."""
+    reasons = []
+    if check.get("max_aspect_ratio", 0) > s.max_aspect_ratio:
+        reasons.append(f"aspect ratio {check['max_aspect_ratio']:.0f} > {s.max_aspect_ratio:g}")
+    if check.get("max_non_orthogonality", 0) > s.max_non_orthogonality:
+        reasons.append(f"non-orthogonality {check['max_non_orthogonality']:.1f}° > {s.max_non_orthogonality:g}°")
+    if check.get("min_orthogonal_quality", 1) < s.min_orthogonal_quality:
+        reasons.append(f"orthogonal quality {check['min_orthogonal_quality']:.3f} < {s.min_orthogonal_quality:g}")
+    return ("bad" if reasons else "ok"), reasons
 
 
 # ---------------------------------------------------------------- gmsh 메쉬 생성
@@ -480,6 +510,7 @@ def _generate(job: MeshJob, root: Path, plots: bool) -> dict:
         raise ConfigError(f"Fluent 메쉬 검증 실패 ({job.name}): {check}")
 
     h1 = s.first_cell_height()
+    flag, reasons = quality_flag(check, s)
     info = {
         "name": job.name,
         "fingerprint": job.fingerprint(),
@@ -493,6 +524,13 @@ def _generate(job: MeshJob, root: Path, plots: bool) -> dict:
         "min_quality": q_min,
         "min_orthogonal_quality": check["min_orthogonal_quality"],  # Fluent Mesh > Quality 와 같은 정의
         "cells_oq_below_0.1": check["cells_oq_below_0.1"],
+        "max_aspect_ratio": check["max_aspect_ratio"],
+        "max_non_orthogonality": check["max_non_orthogonality"],
+        "mean_non_orthogonality": check["mean_non_orthogonality"],
+        "quality_flag": flag,
+        "quality_reasons": reasons,
+        "y_plus_target": s.y_plus,
+        "reynolds": s.reynolds,
         "attempts": attempt,
         **stats,
     }

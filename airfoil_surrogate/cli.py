@@ -1,5 +1,6 @@
 """명령줄 인터페이스 (airfoil-surrogate, 줄여서 afs).
 
+    afs make-cases      # 라틴 하이퍼큐브 (m, p, t, α) → cases.csv, 검증용 cases_validation.csv
     afs fetch-airfoils  # UIUC 좌표 파일 내려받기
     afs plan            # 케이스 목록 확인 + 폴더/저널 생성
     afs mesh            # 형상별 메쉬 생성 + 형상/메쉬 이미지
@@ -12,26 +13,43 @@
     afs train           # 기준 방법 / LightGBM / MLP 학습·조건별 평가 → runs/ml/
     afs compare A B     # 학습 결과끼리 같은 케이스로 비교 (실험 1·2, 개선 실험)
     afs edge-cases      # 경계 사례 10개 선정 + 사례별 그래프
+    afs merge-results   # 팀원별 results.csv 합치기 (공통 스키마 확인)
+    afs validate ...    # airfoil2vec (Re 4.66e6) / xfoil (Re 1e5, SST vs SST-LM) / mesh (light vs fine)
+
+모드 전환 (설정 파일의 [flow] 값을 덮어씀, 결과는 runs/<re_mode>_<난류 모델>_<메쉬 모드>_<케이스 목록>/):
+    afs --re-mode validation --mesh-mode fine run
+    afs --turb kOmegaSSTLM --case-list validation run --assignee member1
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 from collections import Counter
 
 from .banner import print_banner
 from .console import ColorArgumentParser, clear_screen
-from .cases import build_cases, filter_cases, partition_cases
+from .cases import build_cases, filter_assignee, filter_cases, partition_cases
 from .config import ConfigError, load_config
 from .expr import ExpressionError
 from .results import collect
 from .runner import build_command, ensure_meshes, prepare_case, read_status, run_all
 
 
+def _cfg(args):
+    cfg = load_config(args.config, {"re_mode": args.re_mode, "mesh_mode": args.mesh_mode,
+                                    "turbulence_model": args.turb, "case_list": args.case_list})
+    if cfg.flow is not None and not getattr(args, "_flow_shown", False):
+        args._flow_shown = True
+        print(f"[flow] {cfg.flow.describe()}")
+        for w in cfg.flow.warnings():
+            print(f"[경고] {w}")
+    return cfg
+
+
 def _load(args):
-    cfg = load_config(args.config)
-    cases = partition_cases(filter_cases(build_cases(cfg), args.only), getattr(args, "part", None))
+    cfg = _cfg(args)
+    cases = filter_assignee(filter_cases(build_cases(cfg), args.only), getattr(args, "assignee", None))
+    cases = partition_cases(cases, getattr(args, "part", None))
     if not cases:
         raise ConfigError("조건에 맞는 케이스가 없습니다.")
     return cfg, cases
@@ -61,7 +79,7 @@ def cmd_plan(args) -> int:
     print(f"\n총 {len(cases)}개 케이스 → {cfg.output_dir}")
     meshes = {c.mesh.name for c in cases if c.mesh is not None}
     if meshes:
-        print(f"형상(메쉬) {len(meshes)}개 → {cfg.output_dir / '_meshes'}")
+        print(f"형상(메쉬) {len(meshes)}개 → {cfg.meshes_dir}")
     if args.dry_run:
         return 0
     template_text = cfg.template.read_text(encoding="utf-8")
@@ -91,7 +109,7 @@ def cmd_run(args) -> int:
     results = run_all(cfg, cases, force=args.force, max_parallel=args.jobs)
     counts = Counter(r.state for r in results)
     print("\n결과: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
-    _print_collect(collect(cfg, build_cases(cfg)), cfg)
+    _print_collect(collect(cfg, build_cases(cfg)), cfg)  # 실행한 케이스 전부 (대기 중은 results.csv에서 빠짐)
     return 1 if counts.get("failed") else 0
 
 
@@ -100,12 +118,34 @@ def cmd_mesh(args) -> int:
     if cfg.mesh is None:
         raise ConfigError("project.toml에 [mesh] 섹션이 없습니다.")
     errors = ensure_meshes(cfg, cases, force=args.force, workers=args.jobs)
-    print(f"\n메쉬 폴더: {cfg.output_dir / '_meshes'}  (형상별 mesh.msh, geometry.png, mesh*.png)")
+    _print_mesh_flags(cases)
+    print(f"\n메쉬 폴더: {cfg.meshes_dir}  (형상별 mesh.msh, mesh_info.json, geometry.png, mesh*.png)")
     return 1 if errors else 0
+
+
+def _print_mesh_flags(cases) -> None:
+    import json
+
+    from .meshing import INFO_FILE
+
+    jobs = {c.mesh.name: c.mesh for c in cases if c.mesh is not None}
+    bad = []
+    for job in jobs.values():
+        path = job.dir / INFO_FILE
+        if path.is_file():
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if info.get("quality_flag") == "bad":
+                bad.append((job.name, info.get("quality_reasons", [])))
+    if bad:
+        print(f"\n[경고] 불량 판정 메쉬 {len(bad)}개 (메쉬는 남기고 표시만, results의 mesh_flag 열):")
+        for name, reasons in bad[:10]:
+            print(f"  {name}: {'; '.join(reasons)}")
 
 
 def _print_collect(result: dict, cfg) -> None:
     print(f"요약: {result['summary']}")
+    if result.get("results"):
+        print(f"공통 스키마 결과: {result['results']}  ({result['n_results']}개 케이스, converged {result['n_converged']}개)")
     if result["ranking"]:
         key = "ld_max" if cfg.results.objective == "max_ld" else "cl_max"
         print(f"형상 순위 ({key} 기준): {result['ranking']}")
@@ -207,6 +247,92 @@ def cmd_gci(args) -> int:
     return 0
 
 
+def cmd_make_cases(args) -> int:
+    from .sampling import make_cases
+
+    cfg = _cfg(args)
+    r = make_cases(cfg, force=args.force)
+    for key, v in r.items():
+        rows = v["rows"]
+        label = "본 데이터" if key == "csv" else "검증용"
+        print(f"{label}: {v['path']}  케이스 {len(rows)}개, 형상 {len({x['shape_id'] for x in rows})}개")
+        for who, (n_shapes, n_cases) in sorted(v["by_assignee"].items()):
+            print(f"  {who:<12} 형상 {n_shapes:>4}개, 케이스 {n_cases:>5}개")
+    print("같은 설정(seed)이면 누가 실행해도 같은 파일이 나옵니다. 팀원은 각자 afs run --assignee <이름>.")
+    return 0
+
+
+def cmd_merge_results(args) -> int:
+    from pathlib import Path
+
+    from .results import merge_results
+
+    r = merge_results([Path(p) for p in args.inputs], Path(args.output))
+    print(f"합침: 파일 {r['files']}개 → {r['path']}  ({r['rows']}개 케이스, converged {r['converged']}개)")
+    return 0
+
+
+def _pct(v) -> str:
+    import math
+
+    return f"{v * 100:.1f}%" if isinstance(v, float) and math.isfinite(v) else "-"
+
+
+def cmd_validate(args) -> int:
+    import math
+    from pathlib import Path
+
+    from . import validate as v
+
+    cfg = _cfg(args)
+    if args.stage == "airfoil2vec":
+        r = v.validate_airfoil2vec(cfg, [Path(p) for p in args.results] if args.results else None, args.metadata)
+        s = r["summary"]
+        print(f"Airfoil2Vec metadata: {s['metadata']}  (형상 {r['reference_shapes']}개)")
+        print(f"판정 기준: CL {s['criteria']['CL']}, CD {s['criteria']['CD']}  "
+              "(우리 +α ↔ 그쪽 inverted −α, CL·CM 부호 반전)")
+        ok_all = True
+        for mode, m in s["by_mesh_mode"].items():
+            ok = m["judged"] > 0 and m["pass"] == m["judged"]
+            ok_all &= ok
+            print(f"  [{mode}] 비교 {m['judged']}/{m['cases']}개, 통과 {m['pass']} (CL {m['CL_pass']}, CD {m['CD_pass']}), "
+                  f"|ΔCL| 평균 {m['mean_abs_dCL']:.4f}, |ΔCD|/CD 평균 {_pct(m['mean_abs_dCD_rel'])} "
+                  f"최대 {_pct(m['max_abs_dCD_rel'])}" + (f", 미수렴 {m['not_converged']}" if m["not_converged"] else "")
+                  + ("  → 통과" if ok else "  → 미통과"))
+        d = s.get("light_vs_fine")
+        if d:
+            print(f"  경량 메쉬 오차 (light − fine, {d['cases']}개): |ΔCL| 평균 {d['CL']['mean_abs']:.4f} 최대 "
+                  f"{d['CL']['max_abs']:.4f}, |ΔCD|/CD 평균 {_pct(d['CD']['mean_abs_rel'])} 최대 {_pct(d['CD']['max_abs_rel'])}")
+        unmatched = [x for x in r["rows"] if not x.get("matched")]
+        if unmatched:
+            print(f"[경고] 기준 데이터에서 짝을 못 찾은 케이스 {len(unmatched)}개 (예: {unmatched[0]['reference']} "
+                  f"α {-unmatched[0]['alpha']:g}). name_format·열 이름을 확인하세요.")
+        print(f"결과: {r['dir']}  (airfoil2vec_report.csv, airfoil2vec_summary.json, mesh_light_vs_fine.csv)")
+        return 0 if ok_all else 1
+    if args.stage == "xfoil":
+        r = v.validate_xfoil(cfg)
+        s = r["summary"]
+        print(f"XFOIL: Re {s['Re']:,.0f}, Ncrit {s['ncrit']:g}, 형상 {s['shapes']}개, 수렴한 점 {s['xfoil_points']}개")
+        for model, m in s["by_model"].items():
+            if "error" in m:
+                print(f"  {model:<12} {m['error']}")
+                continue
+            dcm = m["mean_abs_dCM"]
+            dcm_txt = f"{dcm:.4f}" if isinstance(dcm, float) and math.isfinite(dcm) else "-"
+            print(f"  {model:<12} 비교 {m['compared']}개: |ΔCL| 평균 {m['mean_abs_dCL']:.4f}, "
+                  f"|ΔCD|/CD 평균 {_pct(m['mean_abs_dCD_rel'])}, |ΔCM| 평균 {dcm_txt}, 참고 판정 통과 {m['pass']}")
+        if s["recommended"]:
+            print(f"XFOIL에 더 가까운 난류 모델: {s['recommended']}  (점수 = |ΔCL|/0.1 + |ΔCD/CD|)")
+        print(f"결과: {r['dir']}  (xfoil_polars.csv, xfoil_compare.csv, xfoil_summary.json)")
+        return 0
+    r = v.validate_mesh_modes(cfg)
+    d = r["summary"]
+    print(f"light − fine ({d['cases']}개): |ΔCL| 평균 {d['CL']['mean_abs']:.4f} 최대 {d['CL']['max_abs']:.4f}, "
+          f"|ΔCD|/CD 평균 {_pct(d['CD']['mean_abs_rel'])} 최대 {_pct(d['CD']['max_abs_rel'])}")
+    print(f"결과: {r['path']}")
+    return 0
+
+
 def cmd_fetch_airfoils(args) -> int:
     from pathlib import Path
 
@@ -264,7 +390,7 @@ def _ci(m: dict, key: str, fmt: str = ".4f") -> str:
 def cmd_train(args) -> int:
     from .learn import PI_TAG, TrainOptions, train
 
-    cfg = load_config(args.config)
+    cfg = _cfg(args)
     opts = TrainOptions(models=args.model, features=args.features,
                         hidden=[int(h) for h in args.hidden.split(",") if h],
                         n_seeds=args.seeds, epochs=args.epochs, stall_weight=args.stall_weight,
@@ -301,7 +427,7 @@ def cmd_compare(args) -> int:
     from .analysis import compare
     from .learn import PI_TAG
 
-    cfg = load_config(args.config)
+    cfg = _cfg(args)
     r = compare(cfg, args.runs, args.model, args.name)
     print(f"모든 실행에 공통인 평가 케이스 {r['n_cases']}개(test, test_ood)로 비교합니다.")
     print("ΔMAE = MAE − 기준 MAE (음수 = 개선), [ ] = 짝지은 형상 단위 부트스트랩 95% 신뢰구간, "
@@ -327,7 +453,7 @@ def cmd_edge_cases(args) -> int:
     from .analysis import edge_cases
     from .learn import PI_TAG
 
-    cfg = load_config(args.config)
+    cfg = _cfg(args)
     r = edge_cases(cfg, args.run, args.model, plots=not args.no_plots)
     s = r["scale"]
     print(f"경계 사례 {len(r['rows'])}개 ({args.run}, {args.model}). 오차 점수 = |CL 오차| / {s['cl']:.4f} "
@@ -372,6 +498,13 @@ def main(argv=None) -> int:
                         help="시작 배너 숨기기 (환경 변수 AFS_NO_BANNER=1 과 같음)")
     parser.add_argument("--no-clear", action="store_true",
                         help="시작할 때 터미널 화면을 지우지 않기 (환경 변수 AFS_NO_CLEAR=1 과 같음)")
+    parser.add_argument("--re-mode", choices=["production", "validation"],
+                        help="[flow] re_mode 덮어쓰기: production (Re 1e5) / validation (Re 4.66e6)")
+    parser.add_argument("--mesh-mode", choices=["light", "fine"], help="[flow] mesh_mode 덮어쓰기")
+    parser.add_argument("--turb", choices=["kOmegaSST", "kOmegaSSTLM"],
+                        help="[flow] turbulence_model 덮어쓰기 (Fluent SST k-ω / Transition SST)")
+    parser.add_argument("--case-list", choices=["main", "validation"],
+                        help="케이스 목록: main (cases.csv) / validation (cases_validation.csv)")
     sub = parser.add_subparsers(dest="command")
 
     def add(name, func, help_text):
@@ -380,6 +513,8 @@ def main(argv=None) -> int:
                        help="케이스/그룹 이름 필터 (와일드카드 가능, 예: 'M0.3*')")
         p.add_argument("--part", metavar="K/N",
                        help="형상 단위로 N등분한 K번째 몫만 (팀원 분담용, 예: 1/4)")
+        p.add_argument("--assignee", nargs="+", metavar="NAME",
+                       help="cases.csv의 assignee(담당자)가 이 이름인 케이스만 (예: --assignee member1)")
         p.set_defaults(func=func)
         return p
 
@@ -401,6 +536,18 @@ def main(argv=None) -> int:
     p = add("gci", cmd_gci, "메쉬 독립성 확인: mesh_level 3단계 결과로 Richardson 외삽·GCI 계산")
     p.add_argument("--quantity", nargs="+", metavar="Q", help="계산할 값 (기본: cl, cd와 요소별 cl-*, cd-*)")
     p.add_argument("--no-plots", action="store_true", help="그래프 없이 CSV만")
+    p = sub.add_parser("make-cases", help="라틴 하이퍼큐브 (m, p, t, α) 케이스 목록 → cases.csv, cases_validation.csv")
+    p.add_argument("--force", action="store_true", help="내용이 다른 기존 목록도 덮어씀")
+    p.set_defaults(func=cmd_make_cases)
+    p = sub.add_parser("merge-results", help="팀원별 results.csv를 하나로 합치기 (공통 스키마·중복 확인)")
+    p.add_argument("output", help="합친 파일 경로")
+    p.add_argument("inputs", nargs="+", help="results.csv 파일들")
+    p.set_defaults(func=cmd_merge_results)
+    p = sub.add_parser("validate", help="검증: airfoil2vec (Re 4.66e6) / xfoil (Re 1e5, SST vs SST-LM) / mesh (light vs fine)")
+    p.add_argument("stage", choices=["airfoil2vec", "xfoil", "mesh"])
+    p.add_argument("--results", nargs="+", help="(airfoil2vec) 비교할 results.csv (기본: validation 모드 light·fine 결과)")
+    p.add_argument("--metadata", help="(airfoil2vec) metadata parquet/csv 경로 ([validation.airfoil2vec] metadata 대신)")
+    p.set_defaults(func=cmd_validate)
     p = add("fetch-airfoils", cmd_fetch_airfoils, "UIUC 좌표 파일 내려받기 (없는 파일만)")
     p.add_argument("--zip", help="UIUC coord_seligFmt.zip 경로 (사이트 대신 압축 파일에서 꺼냄)")
     p.add_argument("--url", help="내려받을 주소 템플릿 (기본: UIUC, {name} = 파일 이름)")
@@ -410,7 +557,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("train", help="회귀 모델 학습·평가 (dataset 결과 사용)")
     p.add_argument("--model", nargs="+", default=["baseline", "lgbm", "mlp"],
                    choices=["baseline", "lgbm", "mlp"], help="학습할 모델 (기본: 셋 다)")
-    p.add_argument("--features", default="cst16", help="형상 특성: cst16(면당 8개) 또는 cst8(면당 4개)")
+    p.add_argument("--features", default="cst16", choices=["cst16", "cst8", "mpt"],
+                   help="형상 특성: cst16(CST 면당 8개), cst8(면당 4개), mpt(NACA m, p, t)")
     p.add_argument("--hidden", default="64,64", help="MLP 은닉층 크기 (예: 32,32 / 128,128,128)")
     p.add_argument("--seeds", type=int, default=5, help="MLP 앙상블 시드 수")
     p.add_argument("--epochs", type=int, default=2000, help="MLP 최대 에폭 (검증 손실로 조기 종료)")

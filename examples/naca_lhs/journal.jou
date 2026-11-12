@@ -1,0 +1,43 @@
+; ============================================================
+; naca_lhs 저널 템플릿 (Fluent 2D, 단일 익형 자유류)
+;  - 달러+중괄호 표기는 케이스마다 자동 치환 ([flow] 설정에서 계산된 값)
+;  - 메쉬는 형상마다 하나, 받음각은 유입 방향으로만 넣습니다 (메쉬 회전 없음)
+;  - 양력·항력: 물체축 cx, cy 리포트를 도구가 같은 받음각으로 회전 (CL, CD 방향을 따로 돌릴 필요 없음)
+;  준비물: base_sst.cas.h5, base_sst_lm.cas.h5 (docs/FLUENT_BASE_CASE_NACA_LHS.md)
+; ============================================================
+
+/file/start-transcript "transcript.txt"
+
+; 난류 모델별 베이스 케이스 ([flow] turbulence_model → base_cases)
+/file/read-case "${project_dir}/${base_case}"
+
+; 형상별 메쉬로 교체 (경계 이름 main / inlet / top / bottom / outlet)
+/file/replace-mesh "${mesh_file}"
+/mesh/check
+/mesh/quality
+
+; 유입: 속도 (U cos α, U sin α), 난류 k = 1.5 (U I)², ω = √k / (Cμ^¼ l)
+/define/named-expressions/edit "speed" definition "${velocity:.6f} [m/s]" q
+/define/named-expressions/edit "alpha" definition "${flow_angle} [deg]" q
+/define/named-expressions/edit "k_in" definition "${k_in:.6e} [m^2/s^2]" q
+/define/named-expressions/edit "omega_in" definition "${omega_in:.6e} [s^-1]" q
+${model_lines}
+
+; 기준값: Aref = c × span, lref = c, U, ρ, μ (Re·메쉬 모드가 바뀌어도 케이스마다 다시 넣음)
+/report/reference-values/velocity ${velocity:.6f}
+/report/reference-values/density ${density}
+/report/reference-values/viscosity ${viscosity:.6e}
+/report/reference-values/length ${lref}
+/report/reference-values/area ${aref}
+/report/reference-values/depth ${span}
+
+/solve/report-files/edit "coef-rfile" file-name "coef-rfile.out" q
+
+/solve/initialize/hyb-initialization
+/solve/iterate ${iterations}
+
+; 표면 Cp (선택, [results] cp_stations 를 켰을 때만 실제 명령)
+${cp_export}
+
+/file/stop-transcript
+/exit yes

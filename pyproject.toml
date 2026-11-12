@@ -4,15 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "airfoil-surrogate"
-version = "0.1.0"
+version = "0.2.0"
 description = "단일 익형 ANSYS Fluent 데이터셋 생성과 CST 기반 CL/CD 회귀 모델"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy", "matplotlib", "gmsh>=4.11"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pyarrow"]
 ml = ["lightgbm", "torch"]
+validation = ["pyarrow", "huggingface_hub"]  # afs validate airfoil2vec (metadata parquet만 받음)
 
 [project.scripts]
 afs = "airfoil_surrogate.cli:main"

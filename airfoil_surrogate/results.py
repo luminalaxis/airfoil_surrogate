@@ -10,10 +10,26 @@ from pathlib import Path
 from .cases import Case
 from .config import ProjectConfig, safe_name
 from .convergence import OSCILLATING, ConvergenceConfig, classify, coefficient_history, solver_log_info
-from .meshing import mesh_name
+from .meshing import INFO_FILE, mesh_name
 from .runner import LOG_NAME, TRANSCRIPT_NAME, read_status
 
 _QUOTED = re.compile(r'"([^"]*)"')
+
+# 팀 공통 결과 스키마 (results.csv, 한 행 = 한 케이스). 4명이 같은 열로 내고 afs merge-results로 합친다
+RESULT_COLUMNS = (
+    "case_id", "m", "p", "t", "alpha",            # 입력
+    "Re", "turb_model", "mesh_mode",              # 조건
+    "CL", "CD", "CM",                             # 출력
+    "converged", "n_iter", "runtime_s",           # 수렴 정보
+    "n_cells", "yplus_max", "yplus_mean",         # 메쉬 품질
+    "assignee", "solver_version",                 # 추적용
+)
+_FLUENT_VERSION = re.compile(r"Fluent\s+(?:Release\s+)?(20\d\d\s*R\d|\d+\.\d+(?:\.\d+)?)", re.IGNORECASE)
+_AWP_VERSION = re.compile(r"[\\/]v(\d)(\d)(\d)[\\/]", re.IGNORECASE)
+_MESH_QUALITY = {
+    "fluent_min_orthogonal_quality": re.compile(r"Minimum Orthogonal Quality\s*=\s*([-+\d.eE]+)"),
+    "fluent_max_aspect_ratio": re.compile(r"Maximum Aspect Ratio\s*=\s*([-+\d.eE]+)"),
+}
 _INDEX_COLUMNS = {"iteration", "time step", "flow-time", "flow time"}
 
 
@@ -65,8 +81,10 @@ def summarize_rows(headers: list[str], rows: list[list[float]], average_last: in
 def _wind_axes(row: dict, aoa_key: str) -> None:
     """물체축 힘계수(cx, cy)를 받음각으로 회전해 양력/항력계수(cl, cd)를 만든다.
 
+    양력 방향 = (−sin α, cos α), 항력 방향 = (cos α, sin α): 유입 속도 (U cos α, U sin α)와 같은 α로 돌린다.
     리포트 이름이 cx/cy 로 시작하면 같은 접미사끼리 짝을 짓는다 (예: cx-main, cy-main → cl-main, cd-main).
-    받음각이 바뀌어도 Fluent 쪽 force vector를 매번 바꿀 필요가 없다.
+    받음각이 바뀌어도 Fluent 쪽 force vector를 매번 바꿀 필요가 없다. 베이스 케이스에 고정 방향 cl/cd 리포트가
+    함께 있으면 회전값과 비교해 다르면 force_dir_check = "mismatch" (양력·항력 방향을 안 돌린 흔한 버그).
     """
     angle = row.get("flow_angle", row.get(aoa_key))
     if not isinstance(angle, (int, float)):
@@ -78,8 +96,13 @@ def _wind_axes(row: dict, aoa_key: str) -> None:
         cx, cy = row[key], row.get(ky)
         if ky is None or not isinstance(cx, float) or not isinstance(cy, float):
             continue
-        row["cl" + suffix] = (cy * math.cos(a) - cx * math.sin(a))
-        row["cd" + suffix] = cx * math.cos(a) + cy * math.sin(a)
+        cl, cd = cy * math.cos(a) - cx * math.sin(a), cx * math.cos(a) + cy * math.sin(a)
+        old_cl, old_cd = row.get("cl" + suffix), row.get("cd" + suffix)
+        if isinstance(old_cl, float) and isinstance(old_cd, float):
+            ok = abs(old_cl - cl) <= 1e-3 * max(1.0, abs(cl)) and abs(old_cd - cd) <= 1e-4 + 1e-3 * abs(cd)
+            row["force_dir_check" + suffix] = "ok" if ok else "mismatch"
+        row["cl" + suffix] = cl
+        row["cd" + suffix] = cd
 
 
 def summarize_case(cfg: ProjectConfig, case: Case) -> dict:
@@ -119,8 +142,155 @@ def summarize_case(cfg: ProjectConfig, case: Case) -> dict:
         _wind_axes(row, cfg.results.x_param)
     if isinstance(row.get("cl"), float) and isinstance(row.get("cd"), float) and row["cd"]:
         row["l/d"] = row["cl"] / row["cd"]
+    _moment(row)
     _forces_per_span(row)
+    _yplus(row)
+    row["runtime_s"] = status.get("elapsed_sec", "")
+    if row["state"] != "pending":
+        row["solver_version"] = solver_version(cfg, case, status)
+        row.update(fluent_mesh_quality(case.dir / TRANSCRIPT_NAME))
+    if case.mesh is not None:
+        row.update(mesh_info_columns(case.mesh.dir / INFO_FILE))
+    if cfg.results.cp_stations and case.mesh is not None:
+        row.update(_cp_columns(cfg, case))
     return row
+
+
+def _moment(row: dict) -> None:
+    """피칭 모멘트 계수 CM (기준점 x/c = moment_ref, 기본 c/4, 머리 들림 +).
+
+    베이스 케이스의 cmz 리포트: 원점(앞전, 코드와 무관) 기준, 축 (0, 0, 1) → 반시계 +.
+    c/4로 옮기면 M_ref = M_0 − x_ref·c·F_y 이고 머리 들림(시계 방향)을 +로 바꾸면 CM = x_ref·cy − cmz.
+    리포트 이름이 cm이면 이미 기준점·부호를 맞춘 값으로 보고 그대로 쓴다.
+    """
+    if isinstance(row.get("cm"), float):
+        return
+    cmz, cy = row.get("cmz"), row.get("cy")
+    if isinstance(cmz, float) and isinstance(cy, float):
+        row["cm"] = float(row.get("moment_ref", 0.25)) * cy - cmz
+
+
+def _yplus(row: dict) -> None:
+    """Fluent 리포트 yplus-max, yplus-avg → yplus_max, yplus_mean."""
+    for src, dst in (("yplus-max", "yplus_max"), ("yplus-avg", "yplus_mean"), ("yplus_avg", "yplus_mean")):
+        if isinstance(row.get(src), float) and dst not in row:
+            row[dst] = row[src]
+
+
+def solver_version(cfg: ProjectConfig, case: Case, status: dict) -> str:
+    """솔버 버전: 로그의 "Fluent 2026 R1" → 실행 파일 경로의 v261 → [results] solver_version → 솔버 종류."""
+    for path in (case.dir / LOG_NAME, case.dir / TRANSCRIPT_NAME):
+        if path.is_file():
+            m = _FLUENT_VERSION.search(path.read_text(encoding="utf-8", errors="replace")[:200_000])
+            if m:
+                return f"Fluent {m.group(1)}"
+    cmd = status.get("command") or []
+    if cfg.solver.kind == "fluent" and cmd:
+        m = _AWP_VERSION.search(str(cmd[0]))
+        if m:
+            return f"Fluent 20{m.group(1)}{m.group(2)} R{m.group(3)}"
+    return cfg.results.solver_version or cfg.solver.kind
+
+
+def fluent_mesh_quality(transcript: Path) -> dict:
+    """저널의 /mesh/quality 출력 (Minimum Orthogonal Quality, Maximum Aspect Ratio)."""
+    if not transcript.is_file():
+        return {}
+    text = transcript.read_text(encoding="utf-8", errors="replace")
+    out = {}
+    for key, pattern in _MESH_QUALITY.items():
+        m = pattern.search(text)
+        if m:
+            try:
+                out[key] = float(m.group(1))
+            except ValueError:
+                pass
+    return out
+
+
+def mesh_info_columns(info_path: Path) -> dict:
+    if not info_path.is_file():
+        return {}
+    import json
+
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    out = {"n_cells": info.get("cells", "")}
+    for src, dst in (("quality_flag", "mesh_flag"), ("max_aspect_ratio", "mesh_max_aspect_ratio"),
+                     ("max_non_orthogonality", "mesh_max_non_orthogonality"),
+                     ("min_orthogonal_quality", "mesh_min_orthogonal_quality")):
+        if src in info:
+            out[dst] = info[src]
+    return out
+
+
+def _cp_columns(cfg: ProjectConfig, case: Case) -> dict:
+    from .cp import column_names, interpolate_cp
+    from .geometry import section_from_params
+
+    path = case.dir / cfg.results.cp_file
+    if not path.is_file():
+        return {k: "" for k in column_names(cfg.results.cp_stations)}
+    el = section_from_params(case.mesh.geometry_params, cfg.root)
+    return interpolate_cp(path, cfg.results.cp_stations, el.xy, el.le_index, case.mesh.settings.chord)
+
+
+def result_row(cfg: ProjectConfig, row: dict) -> dict:
+    """summary 행 → 팀 공통 스키마 행 (RESULT_COLUMNS, Cp를 켰으면 cp_* 열 추가)."""
+    x = cfg.results.x_param
+
+    def num(key):
+        v = row.get(key)
+        return v if isinstance(v, (int, float)) and not (isinstance(v, float) and math.isnan(v)) else ""
+
+    out = {
+        "case_id": row.get("case_id", row["case"]), "m": row.get("m", ""), "p": row.get("p", ""),
+        "t": row.get("t", ""), "alpha": row.get(x, ""),
+        "Re": row.get("reynolds", ""), "turb_model": row.get("turb_model", row.get("turbulence_model", "")),
+        "mesh_mode": row.get("mesh_mode", ""),
+        "CL": num("cl"), "CD": num("cd"), "CM": num("cm"),
+        "converged": bool(row.get("converged", False)) and row.get("state") == "done",
+        "n_iter": row.get("iter_done", ""), "runtime_s": row.get("runtime_s", ""),
+        "n_cells": row.get("n_cells", ""), "yplus_max": num("yplus_max"), "yplus_mean": num("yplus_mean"),
+        "assignee": row.get("assignee", ""), "solver_version": row.get("solver_version", ""),
+    }
+    if cfg.results.cp_stations:
+        from .cp import column_names
+
+        out.update({k: num(k) for k in column_names(cfg.results.cp_stations)})
+    return out
+
+
+def merge_results(paths: list[Path], out: Path) -> dict:
+    """팀원별 results.csv를 하나로. 열이 스키마와 다르거나 같은 case_id가 다른 값으로 두 번 나오면 오류."""
+    from .config import ConfigError
+
+    rows, seen, header = [], {}, None
+    for path in paths:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            cols = reader.fieldnames or []
+            if list(cols[:len(RESULT_COLUMNS)]) != list(RESULT_COLUMNS):
+                raise ConfigError(f"{path}: 열이 공통 스키마와 다릅니다.\n  기대: {', '.join(RESULT_COLUMNS)}\n"
+                                  f"  실제: {', '.join(cols)}")
+            if header is None:
+                header = cols
+            elif cols != header:
+                raise ConfigError(f"{path}: 다른 파일과 열이 다릅니다 (Cp 지점 설정이 다른지 확인).")
+            for r in reader:
+                key = (r["case_id"], r["turb_model"], r["mesh_mode"], r["Re"])
+                if key in seen:
+                    if seen[key] != r:
+                        raise ConfigError(f"case_id {r['case_id']}가 {path.name}에서 다른 값으로 또 나옵니다.")
+                    continue
+                seen[key] = r
+                rows.append(r)
+    rows.sort(key=lambda r: (r["turb_model"], r["mesh_mode"], r["case_id"]))
+    _write_csv(out, rows)
+    return {"path": out, "rows": len(rows), "files": len(paths),
+            "converged": sum(1 for r in rows if r["converged"] == "True")}
 
 
 def _forces_per_span(row: dict) -> None:
@@ -138,8 +308,8 @@ def _forces_per_span(row: dict) -> None:
             row[name] = q * c * row[coef]
 
 
-def _write_csv(path: Path, rows: list[dict]) -> Path:
-    columns: list[str] = []
+def _write_csv(path: Path, rows: list[dict], columns: list[str] | None = None) -> Path:
+    columns = list(columns or [])
     for row in rows:
         columns += [k for k in row if k not in columns]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +325,7 @@ def geometry_keys(cfg: ProjectConfig, cases: list[Case]) -> list[str]:
     """형상을 구분하는 변수: 케이스마다 값이 다른 변수 중 받음각(과 받음각에서 정한 flow_angle)/파생 변수를 뺀 것."""
     keys = []
     for k in cases[0].params:
-        if k in (cfg.results.x_param, "flow_angle") or k in cfg.derived:
+        if k in (cfg.results.x_param, "flow_angle", "case_id", "assignee") or k in cfg.derived:
             continue
         if len({repr(c.params.get(k)) for c in cases}) > 1:
             keys.append(k)
@@ -197,7 +367,21 @@ def collect(cfg: ProjectConfig, cases: list[Case], plots: bool = True) -> dict:
     rows = [summarize_case(cfg, c) for c in cases]
     out_dir = cfg.output_dir
     result = {"summary": _write_csv(out_dir / cfg.results.summary_file, rows), "ranking": None,
-              "top": [], "plots": []}
+              "top": [], "plots": [], "warnings": []}
+    done = [r for r in rows if r.get("state") != "pending"]
+    team = [result_row(cfg, r) for r in done]
+    if team or (out_dir / cfg.results.results_file).is_file():
+        result["results"] = _write_csv(out_dir / cfg.results.results_file, team, list(RESULT_COLUMNS))
+        result["n_results"] = len(team)
+        result["n_converged"] = sum(1 for r in team if r["converged"])
+    bad_dir = [r["case"] for r in rows if r.get("force_dir_check") == "mismatch"]
+    if bad_dir:
+        result["warnings"].append(f"베이스 케이스의 cl/cd 리포트 방향이 받음각과 맞지 않는 케이스 {len(bad_dir)}개 "
+                                  f"(예: {bad_dir[0]}). 결과는 cx/cy를 α로 회전한 값을 씁니다.")
+    bad_mesh = sorted({r.get("mesh", "") for r in rows if r.get("mesh_flag") == "bad"})
+    if bad_mesh:
+        result["warnings"].append(f"불량 판정 메쉬 {len(bad_mesh)}개 (mesh_info.json quality_reasons): "
+                                  + ", ".join(bad_mesh[:5]))
 
     keys = geometry_keys(cfg, cases)
     split_by = [k for k in cfg.results.split_by if k in keys]

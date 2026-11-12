@@ -33,7 +33,7 @@ import numpy as np
 from .cases import Case
 from .config import ConfigError, ProjectConfig
 from .cst import CSTFit, fit_cst, section_stats
-from .geometry import load_section
+from .geometry import NACA_PARAM_KEYS, geometry_params, section_from_params
 from .results import summarize_case
 
 DATASET_DIR = "dataset"
@@ -53,6 +53,7 @@ class MLConfig:
     family_key: str = "family"
     re_key: str = "reynolds"
     tsst_summary: str = ""         # Transition SST로 다시 푼 케이스의 summary.csv (예: runs_tsst/summary.csv)
+    require_converged: bool = False  # true면 converged == False인 케이스를 학습·평가에서 뺀다 (건수는 보고)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "MLConfig":
@@ -79,8 +80,9 @@ def shape_id(params: dict, ml: MLConfig) -> str:
 
 # ---------------------------------------------------------------- 형상 특성
 
-def shape_features(spec, root: Path, orders: list[int]) -> tuple[dict, dict[int, CSTFit]]:
-    el = load_section(spec, root, "main")
+def shape_features(geom: dict, root: Path, orders: list[int]) -> tuple[dict, dict[int, CSTFit]]:
+    """geom: 형상 변수 ((m, p, t[, naca_te]) 또는 main_airfoil)."""
+    el = section_from_params(geom, root, "main")
     feats = section_stats(el.xy, el.le_index)
     fits = {}
     for n in orders:
@@ -204,8 +206,12 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
     shapes: dict[str, dict] = {}
     for c in cases:
         sid = shape_id(c.params, ml)
-        shapes.setdefault(sid, {"shape": sid, "main_airfoil": c.params.get("main_airfoil", sid),
-                                "family": str(c.params.get(ml.family_key, ""))})
+        info = shapes.setdefault(sid, {"shape": sid, "main_airfoil": c.params.get("main_airfoil", sid),
+                                       "family": str(c.params.get(ml.family_key, "")),
+                                       "_geom": geometry_params(c.params)})
+        for k in NACA_PARAM_KEYS:  # (m, p, t) 입력 피처
+            if k in c.params:
+                info[k] = float(c.params[k])
 
     split_path = out_dir / "split.json"
     previous = {} if resplit else _load_split(split_path)
@@ -220,7 +226,7 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
     for sid, info in shapes.items():
         info["split"] = splits[sid]
         try:
-            feats, fits[sid] = shape_features(info["main_airfoil"], cfg.root, ml.cst_orders)
+            feats, fits[sid] = shape_features(info["_geom"], cfg.root, ml.cst_orders)
         except ConfigError as exc:
             warnings.append(f"{sid}: 형상을 읽지 못함 ({exc})")
             info["error"] = str(exc)
@@ -251,8 +257,10 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
             "cl": cl, "cd": cd,
             "log10_cd": math.log10(cd) if cd is not None and cd > 0 else None,
             "avg_iters": r.get("avg_iters", ""),
+            "converged": int(bool(r.get("converged")) and r.get("state") == "done"),
             **yplus_columns(r),
         }
+        row.update({k: info[k] for k in NACA_PARAM_KEYS if k in info})
         if cl is None or row["log10_cd"] is None:
             row["conv_state"] = row["conv_state"] if row["conv_state"] == "diverged" else "no_data"
         row.update({k: v for k, v in info.items()
@@ -275,7 +283,8 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
         warnings.append("y+ 리포트가 없습니다. 베이스 케이스에 yplus-max, yplus-avg 리포트를 추가하세요 "
                         "(docs/FLUENT_BASE_CASE_AIRFOIL.md 9단계).")
     _write_csv(out_dir / "dataset.csv", labeled)
-    _write_csv(out_dir / "airfoils.csv", sorted(shapes.values(), key=lambda s: (s["split"], s["shape"])))
+    _write_csv(out_dir / "airfoils.csv", [{k: v for k, v in s.items() if k != "_geom"}
+                                          for s in sorted(shapes.values(), key=lambda s: (s["split"], s["shape"]))])
     plot = _plot_worst_fits(shapes, fits, cfg.root, out_dir / "cst_fits.png")
 
     counts = {s: {"shapes": sum(1 for v in shapes.values() if v["split"] == s),
@@ -330,7 +339,7 @@ def _plot_worst_fits(shapes: dict, fits: dict[str, dict[int, CSTFit]], root: Pat
     fig, axes = plt.subplots(len(worst), 1, figsize=(8, 1.8 * len(worst)), squeeze=False)
     x = 0.5 * (1 - np.cos(np.linspace(0, np.pi, 300)))
     for ax, sid in zip(axes[:, 0], worst):
-        el = load_section(shapes[sid]["main_airfoil"], root, "main")
+        el = section_from_params(shapes[sid]["_geom"], root, "main")
         ax.plot(el.xy[:, 0], el.xy[:, 1], "k.", ms=2, label="coordinates")
         for k, style in zip(sorted(fits[sid], reverse=True), ("-", "--")):
             yu, yl = fits[sid][k].evaluate(x)
@@ -350,7 +359,7 @@ def load_dataset(path: Path) -> list[dict]:
     """dataset.csv를 읽는다 (숫자 열은 float, 빈 값은 None)."""
     if not path.is_file():
         raise ConfigError(f"데이터셋이 없습니다: {path}  (먼저 afs dataset 실행)")
-    text_cols = {"case", "shape", "family", "split", "state", "conv_state"}
+    text_cols = {"case", "shape", "family", "split", "state", "conv_state", "conv_state_tsst"}
     rows = []
     with path.open(encoding="utf-8-sig", newline="") as f:
         for raw in csv.DictReader(f):

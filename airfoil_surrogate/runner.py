@@ -26,10 +26,12 @@ LOG_NAME = "solver.log"
 # 나오지 않아서, 오류·발산·잔차는 이 파일에서 읽는다.
 TRANSCRIPT_NAME = "transcript.txt"
 # 다시 실행할 때 지우는 이전 결과 (Fluent가 덮어쓰기 확인을 물으면 배치 저널이 꼬이거나 멈춘다)
-STALE_OUTPUTS = ("*.png", TRANSCRIPT_NAME, "*.cas.h5", "*.dat.h5", "*.cas.gz", "*.dat.gz")
+STALE_OUTPUTS = ("*.png", TRANSCRIPT_NAME, "*.cas.h5", "*.dat.h5", "*.cas.gz", "*.dat.gz", "cp.txt")
 MESH_WORKERS_DEFAULT_MAX = 8  # mesh -j 를 주지 않았을 때 동시에 만들 메쉬 수의 상한 (메모리 고려)
 STATUS_NAME = "status.json"
 PARAMS_NAME = "case.json"
+RUN_LOG_NAME = "run_log.csv"  # 결과 폴더에 케이스 실행마다 한 줄 (담당자, 상태, 소요 시간, 컴퓨터)
+RUN_LOG_COLUMNS = ("finished", "case", "assignee", "state", "runtime_s", "message", "host")
 
 _print_lock = threading.Lock()
 
@@ -52,6 +54,7 @@ def case_variables(cfg: ProjectConfig, case: Case) -> dict:
         "case_dir": _posix(case.dir),
         "project_dir": _posix(cfg.root),
         "nprocs": cfg.solver.processes,
+        "cp_export": cfg.results.cp_export_command if cfg.results.cp_stations else "; 표면 Cp 내보내기 꺼짐 ([results] cp_stations)",
     }
     if case.mesh is not None:
         variables["mesh_file"] = _posix(case.mesh.mesh_file)
@@ -319,6 +322,28 @@ def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
     return RunResult(case, state, msg, elapsed)
 
 
+_run_log_lock = threading.Lock()
+
+
+def append_run_log(cfg: ProjectConfig, r: RunResult) -> None:
+    """실행 로그(run_log.csv)에 한 줄 추가. 건너뛴 케이스는 남기지 않는다."""
+    if r.state == "skipped":
+        return
+    import csv
+    import platform
+
+    path = cfg.output_dir / RUN_LOG_NAME
+    with _run_log_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new = not path.is_file()
+        with path.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(RUN_LOG_COLUMNS)
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), r.case.name, r.case.params.get("assignee", ""),
+                        r.state, round(r.elapsed, 1), r.message, platform.node()])
+
+
 def run_all(cfg: ProjectConfig, cases: list[Case], force: bool = False,
             max_parallel: int | None = None) -> list[RunResult]:
     template_text = cfg.template.read_text(encoding="utf-8")
@@ -328,6 +353,7 @@ def run_all(cfg: ProjectConfig, cases: list[Case], force: bool = False,
     results: list[RunResult] = []
 
     def report(i: int, r: RunResult) -> None:
+        append_run_log(cfg, r)
         extra = f" - {r.message}" if r.message else ""
         log(f"[{i}/{total}] {r.case.name:<30} {r.state:<8} {r.elapsed/60:6.1f}분{extra}")
 

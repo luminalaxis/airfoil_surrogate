@@ -1,7 +1,10 @@
 """회귀 모델 학습·평가 (afs train).
 
-입력: 형상 계수(cst16 = 면당 8개 × 2, 또는 cst8 = 면당 4개 × 2) + 받음각 aoa [deg] + log10(Re)
-목표: cl, log10_cd
+입력: 형상 특성 + 받음각 aoa [deg] + log10(Re)
+  형상 특성: cst16 (CST 면당 8개 × 2) / cst8 (면당 4개 × 2) / mpt (NACA 4자리 실수 파라미터 m, p, t)
+목표: cl, log10_cd (CD는 스케일이 작고 범위가 넓어 log10으로 변환)
+정규화: MLP는 입력·출력을 학습 데이터 평균·표준편차로 표준화 (LightGBM은 트리 모델이라 불필요)
+[ml] require_converged = true 면 converged == False 케이스를 학습·평가에서 뺀다
 
 모델
   baseline : 얇은 익형 이론 CL = 2π(α − α0) (α0는 형상의 캠버선으로 계산), log10 CD = 학습 데이터 평균
@@ -44,7 +47,7 @@ EVAL_SPLITS = ("val", "test", "test_ood")
 DIVERGED = "diverged"
 ML_DIR = "ml"
 # predictions.csv에 함께 남기는 데이터셋 열 (경계 사례 분석용). yplus* 열도 함께 남긴다.
-CARRY_COLUMNS = ("conv_cl_std", "conv_cd_std", "conv_state_tsst", "cl_tsst", "log10_cd_tsst",
+CARRY_COLUMNS = ("m", "p", "t", "converged", "conv_cl_std", "conv_cd_std", "conv_state_tsst", "cl_tsst", "log10_cd_tsst",
                  "d_cl_tsst", "d_log10_cd_tsst")
 
 
@@ -64,6 +67,10 @@ class TrainOptions:
 
 
 def feature_columns(rows: list[dict], features: str) -> list[str]:
+    if features == "mpt":
+        if not all(k in rows[0] and rows[0][k] is not None for k in ("m", "p", "t")):
+            raise ConfigError("데이터셋에 m, p, t 열이 없습니다 ((m, p, t) 케이스 목록으로 만든 데이터셋에서만 --features mpt).")
+        return ["m", "p", "t", "aoa", "log10_re"]
     shape = [k for k in rows[0] if k.startswith(f"{features}_") and k[len(features) + 1] in "ul"
              and k[len(features) + 2:].isdigit()]
     if not shape:
@@ -285,6 +292,10 @@ def count_only(rows: list[dict], model: str) -> list[dict]:
 def _split_rows(rows: list[dict], ml: MLConfig, opts: TrainOptions) -> dict[str, list[dict]]:
     usable = set(ml.train_states)
     labeled = [r for r in rows if r.get("cl") is not None and r.get("log10_cd") is not None]
+    if ml.require_converged:  # converged == False: 기록은 dataset.csv에 남기고 학습·평가에서만 뺀다
+        for r in labeled:
+            if not r.get("converged") and r["conv_state"] != DIVERGED:
+                r["conv_state"] = "not_converged"
     ood_shapes = sorted({r["shape"] for r in labeled if r["split"] == "test_ood"})
     moved: set[str] = set()
     if opts.ood_train_fraction > 0 and ood_shapes:

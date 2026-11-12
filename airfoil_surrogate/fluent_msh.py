@@ -169,7 +169,10 @@ def check_msh(path: Path) -> dict:
         elif c0 == 0:
             raise ValueError("c0가 0인 면이 있습니다.")
     area, count = area[1:], count[1:]
-    oq = orthogonal_quality(nodes, faces, n_cells) if not (area <= 0).any() else np.zeros(n_cells)
+    ok = not (area <= 0).any()
+    oq = orthogonal_quality(nodes, faces, n_cells) if ok else np.zeros(n_cells)
+    no_max, no_mean = non_orthogonality(nodes, faces, n_cells) if ok else (90.0, 90.0)
+    ar = aspect_ratio(nodes, faces, n_cells)
     return {
         "cells": n_cells,
         "min_area": float(area.min()),
@@ -178,6 +181,9 @@ def check_msh(path: Path) -> dict:
         "open_cells": int((count < 3).sum()),
         "min_orthogonal_quality": float(oq.min()),
         "cells_oq_below_0.1": int((oq < 0.1).sum()),
+        "max_aspect_ratio": float(ar.max()),
+        "max_non_orthogonality": no_max,
+        "mean_non_orthogonality": no_mean,
         "names": data["names"],
     }
 
@@ -217,3 +223,45 @@ def orthogonal_quality(nodes: np.ndarray, faces: list, n_cells: int) -> np.ndarr
     np.minimum.at(oq, c0[inner], cc)
     np.minimum.at(oq, c1[inner], cc)
     return np.clip(oq[1:], 0.0, 1.0)
+
+
+def _centroids(nodes: np.ndarray, faces: list, n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    f = np.asarray([fc[:4] for fc in faces], dtype=np.int64)
+    p0, p1 = nodes[f[:, 0] - 1], nodes[f[:, 1] - 1]
+    cross = p0[:, 0] * p1[:, 1] - p1[:, 0] * p0[:, 1]
+    area = np.zeros(n_cells + 1)
+    cx = np.zeros(n_cells + 1)
+    cy = np.zeros(n_cells + 1)
+    for cell, sign in ((f[:, 2], 1.0), (f[:, 3], -1.0)):
+        np.add.at(area, cell, sign * 0.5 * cross)
+        np.add.at(cx, cell, sign * (p0[:, 0] + p1[:, 0]) * cross / 6)
+        np.add.at(cy, cell, sign * (p0[:, 1] + p1[:, 1]) * cross / 6)
+    area[0] = 1.0
+    return f, np.column_stack([cx / area, cy / area])
+
+
+def non_orthogonality(nodes: np.ndarray, faces: list, n_cells: int) -> tuple[float, float]:
+    """OpenFOAM checkMesh의 비직교성 [deg]: 내부 면마다 면 법선과 (셀 중심 → 이웃 셀 중심)의 각. (최대, 평균)"""
+    f, cen = _centroids(nodes, faces, n_cells)
+    inner = f[:, 3] > 0
+    if not inner.any():
+        return 0.0, 0.0
+    f = f[inner]
+    d = nodes[f[:, 1] - 1] - nodes[f[:, 0] - 1]
+    normal = np.column_stack([d[:, 1], -d[:, 0]])  # c0(왼쪽) → c1(오른쪽)
+    cc = cen[f[:, 3]] - cen[f[:, 2]]
+    cos = (normal * cc).sum(1) / np.maximum(np.linalg.norm(normal, axis=1) * np.linalg.norm(cc, axis=1), 1e-300)
+    ang = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+    return float(ang.max()), float(ang.mean())
+
+
+def aspect_ratio(nodes: np.ndarray, faces: list, n_cells: int) -> np.ndarray:
+    """셀별 종횡비 = 가장 긴 변 / 가장 짧은 변 (경계층 사각형은 벽 방향 간격 / 첫 셀 높이)."""
+    f = np.asarray([fc[:4] for fc in faces], dtype=np.int64)
+    length = np.linalg.norm(nodes[f[:, 1] - 1] - nodes[f[:, 0] - 1], axis=1)
+    lmax = np.zeros(n_cells + 1)
+    lmin = np.full(n_cells + 1, np.inf)
+    for cell in (f[:, 2], f[:, 3]):
+        np.maximum.at(lmax, cell, length)
+        np.minimum.at(lmin, cell, length)
+    return (lmax / np.maximum(lmin, 1e-300))[1:]

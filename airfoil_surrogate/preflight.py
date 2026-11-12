@@ -71,6 +71,16 @@ def run_checks(cfg: ProjectConfig, cases: list[Case], parallel: int | None = Non
     items: list[Item] = []
     add = lambda *a: items.append(Item(*a))  # noqa: E731
 
+    # ---------------------------------------------------------------- 유동 조건·모드
+    if cfg.flow is not None:
+        add(INFO, f"[flow] {cfg.flow.re_mode} / {cfg.flow.turbulence_model} / mesh {cfg.flow.mesh_mode}",
+            cfg.flow.describe() + f"  → 결과 {cfg.output_dir}")
+        for w in cfg.flow.warnings():
+            add(WARN, "유동 조건", w)
+        add(INFO, "베이스 케이스 재질·리포트가 [flow]와 맞는지 확인",
+            f"밀도 {cfg.flow.rho:g} kg/m³, 점성 {cfg.flow.rho * cfg.flow.nu:.5g} Pa·s, 리포트 cx, cy, cmz, yplus-max, "
+            "yplus-avg, inlet 난류 = named expression k_in, omega_in (docs/FLUENT_BASE_CASE_NACA_LHS.md)")
+
     # ---------------------------------------------------------------- 실행할 케이스
     run_cases = list(cases)
     add(OK, f"실행할 케이스 {len(cases)}개")
@@ -116,8 +126,8 @@ def run_checks(cfg: ProjectConfig, cases: list[Case], parallel: int | None = Non
             label = _set_label(cs)
             if path in missing:
                 add(TODO, f"베이스 케이스 만들기: {path.name}",
-                    f"{label}케이스 {len(cs)}개가 읽음. 베이스 케이스 문서(docs/FLUENT_BASE_CASE.md, 단일 익형은 "
-                    f"FLUENT_BASE_CASE_AIRFOIL.md) 순서로 만들어 {path.parent} 에 저장")
+                    f"{label}케이스 {len(cs)}개가 읽음. 베이스 케이스 문서(docs/FLUENT_BASE_CASE_NACA_LHS.md, "
+                    f"예전 UIUC 예제는 FLUENT_BASE_CASE_AIRFOIL.md) 순서로 만들어 {path.parent} 에 저장")
             else:
                 add(OK, f"베이스 케이스 있음: {path.name}", f"{label}케이스 {len(cs)}개")
 
@@ -231,9 +241,12 @@ def _mesh_checks(cfg: ProjectConfig, run_cases: list[Case], add) -> list[int]:
             f"{first[0]}: {first[1][:160]}")
 
     cells, zones_by_set, oq = [], {}, {}
+    bad = {}
     for job in current:
         info = json.loads((job.dir / INFO_FILE).read_text(encoding="utf-8"))
         cells.append(int(info.get("cells", 0)))
+        if info.get("quality_flag") == "bad":
+            bad[job.name] = "; ".join(info.get("quality_reasons", []))
         if info.get("min_orthogonal_quality") is not None:
             oq[job.name] = float(info["min_orthogonal_quality"])
     for c in run_cases:
@@ -254,6 +267,10 @@ def _mesh_checks(cfg: ProjectConfig, run_cases: list[Case], add) -> list[int]:
             sample = next(iter(meshes))
             add(OK, f"{label}: 메쉬 {len(meshes)}개 경계 이름 같음",
                 f"{', '.join(variants[0])}  (베이스 케이스용 예: {sample})")
+    if bad:
+        first = next(iter(bad.items()))
+        add(WARN, f"불량 판정 메쉬 {len(bad)}개 (종횡비·비직교성·직교 품질 기준, [mesh] max_aspect_ratio 등)",
+            f"{first[0]}: {first[1]}")
     if cells:
         add(INFO, f"셀 수 {min(cells):,} ~ {max(cells):,} (중앙값 {int(statistics.median(cells)):,})")
     if oq:
@@ -302,7 +319,6 @@ def _path_checks(cfg: ProjectConfig, run_cases: list[Case], add) -> None:
 
 def _estimates(cfg: ProjectConfig, run_cases: list[Case], todo_cases: list[Case], statuses: dict,
                journals: dict, mesh_cells: list[int], parallel: int | None, add) -> None:
-    from .meshing import MESH_FILE
 
     jobs = {c.mesh.name: c.mesh for c in run_cases if c.mesh is not None}
     sample = next(iter(journals.values()), "")
