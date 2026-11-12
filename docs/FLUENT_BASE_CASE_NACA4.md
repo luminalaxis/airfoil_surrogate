@@ -1,4 +1,4 @@
-# Fluent 베이스 케이스 만들기 (examples/naca_lhs, 팀 공통)
+# Fluent 베이스 케이스 만들기 (examples/naca4, 팀 공통)
 
 `afs run`은 케이스마다 **베이스 케이스를 열고 → 형상 메쉬로 바꾸고 → 유속·받음각·유입 난류·기준값을 바꿔 → 계산**합니다.
 난류 모델마다 베이스 케이스가 하나씩 필요합니다 (`[flow] base_cases`).
@@ -6,14 +6,14 @@
 | 파일 | 난류 모델 | 쓰는 경우 |
 |---|---|---|
 | `base_sst.cas.h5` | SST k-ω (`kOmegaSST`) | 본 데이터, Airfoil2Vec 검증, XFOIL 비교 |
-| `base_sst_lm.cas.h5` | Transition SST (`kOmegaSSTLM`) | XFOIL 비교 (난류 모델 선정) |
+| `base_sst_lm.cas.h5` | Transition SST (`kOmegaSSTLM`) | (선택) 이 예제는 SST 고정이라 필요 없음 |
 
 **한 명이 만들어 4명이 같은 파일을 씁니다.** 재질·리포트·잔차 기준이 다르면 결과를 합칠 수 없습니다.
 
 ## 0. 메쉬 하나 만들기
 
 ```bash
-cd examples/naca_lhs
+cd examples/naca4
 ```
 
 ```bash
@@ -127,7 +127,7 @@ Fluent 버전마다 프롬프트가 다를 수 있으니 GUI에서 `File > Expor
 
 ## 9. 저장
 
-`File > Write > Case` → `examples/naca_lhs/base_sst.cas.h5`. Viscous만 Transition SST로 바꾸고 `intermittency_in`과 inlet Intermittency를 넣어 `base_sst_lm.cas.h5`로 한 번 더 저장합니다.
+`File > Write > Case` → `examples/naca4/base_sst.cas.h5`. Viscous만 Transition SST로 바꾸고 `intermittency_in`과 inlet Intermittency를 넣어 `base_sst_lm.cas.h5`로 한 번 더 저장합니다.
 
 ## 10. 파일럿과 팀 실행
 

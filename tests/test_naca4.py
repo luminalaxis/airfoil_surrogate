@@ -19,14 +19,15 @@ from airfoil_surrogate.flow import FlowConfig, retheta_t
 from airfoil_surrogate.fluent_msh import Boundary, check_msh, write_msh
 from airfoil_surrogate.geometry import naca4, naca4_mpt, naca_code, normalize, section_from_params
 from airfoil_surrogate.results import RESULT_COLUMNS, _moment, _wind_axes
-from airfoil_surrogate.sampling import SamplingConfig, generate_cases, latin_hypercube, validation_cases
-from airfoil_surrogate.validate import (Airfoil2VecConfig, compare_reference, mesh_mode_difference,
-                                        parse_polar, xfoil_script)
+from airfoil_surrogate.sampling import (SamplingConfig, generate_cases, latin_hypercube, valid_naca_codes,
+                                        validation_cases)
+from airfoil_surrogate.validate import (Airfoil2VecConfig, compare_reference, marching_alphas,
+                                        mesh_mode_difference, parse_polar, xfoil_script)
 
 HERE = Path(__file__).parent
 FAKE_SOLVER = HERE / "fake_naca_solver.py"
 FAKE_XFOIL = HERE / "fake_xfoil.py"
-EXAMPLE = HERE.parent / "examples" / "naca_lhs" / "project.toml"
+EXAMPLE = HERE.parent / "examples" / "naca4" / "project.toml"
 
 FLOW = {
     "chord": 0.1, "nu": 1.4607e-5, "turbulence_intensity": 0.01, "length_scale": 0.01,
@@ -80,14 +81,18 @@ def test_flow_rejects_inconsistent_settings(bad, msg):
         FlowConfig.from_dict({**FLOW, **bad})
 
 
-def test_example_project_loads_in_all_modes():
-    for over in ({}, {"re_mode": "validation"}, {"mesh_mode": "fine"}, {"turbulence_model": "kOmegaSSTLM"},
-                 {"case_list": "validation"}):
-        cfg = load_config(EXAMPLE, over)
-        assert cfg.constants["base_case"] == ("base_sst_lm.cas.h5" if over.get("turbulence_model") else "base_sst.cas.h5")
-        assert cfg.mesh["surface_cells"] == (300 if over.get("mesh_mode") == "fine" else 120)
-        assert cfg.meshes_dir == cfg.base_output_dir / "_meshes"
-        assert cfg.output_dir.name == cfg.flow.tag
+def test_example_project_fixed_conditions():
+    cfg = load_config(EXAMPLE)
+    assert cfg.flow.chord == 0.1 and cfg.flow.turbulence_model == "kOmegaSST"   # 코드 100 mm, 난류 모델 고정
+    assert cfg.constants["base_case"] == "base_sst.cas.h5"
+    assert cfg.mesh["surface_cells"] == 120 and cfg.output_dir.name == cfg.flow.tag
+    assert load_config(EXAMPLE, {"mesh_mode": "fine"}).mesh["surface_cells"] == 300
+    assert load_config(EXAMPLE, {"re_mode": "validation"}).flow.chord == 0.1
+    with pytest.raises(ConfigError, match="kOmegaSSTLM"):
+        load_config(EXAMPLE, {"turbulence_model": "kOmegaSSTLM"})       # 다른 난류 모델은 막힘
+    rows = generate_cases(SamplingConfig.from_dict(cfg.sampling))
+    assert len(rows) == 300 and len({r["shape_id"] for r in rows}) == 100
+    assert {r["alpha"] for r in rows} == {0.0, 8.0, 15.0}
 
 
 # ================================================================ §1 형상
@@ -145,6 +150,30 @@ def test_generate_cases_nested_ranges_assignees_and_reproducible():
     assert set(counts.values()) == {20}
     joint = generate_cases(SamplingConfig.from_dict({"mode": "joint", "n_cases": 30}))
     assert len({r["shape_id"] for r in joint}) == 30
+
+
+def test_naca_code_grid_same_alphas_for_all_shapes():
+    sc = SamplingConfig.from_dict({"mode": "naca_codes", "n_shapes": 100, "alpha_values": [0, 8, 15],
+                                   "m": [0, 6], "p": [2, 6], "t": [6, 18]})
+    pool = valid_naca_codes(sc)
+    assert len(pool) == 13 + 6 * 5 * 13 and "0012" in pool and "2412" in pool and "2012" not in pool
+    rows = generate_cases(sc)
+    assert rows == generate_cases(sc)
+    shapes = {}
+    for r in rows:
+        shapes.setdefault(r["shape_id"], []).append(r["alpha"])
+    assert len(shapes) == 100 and all(sorted(a) == [0, 8, 15] for a in shapes.values())
+    assert rows[0]["case_id"] == f"{rows[0]['shape_id']}_a0"
+    assert all(r["p"] == 0 for r in rows if r["m"] == 0)
+    fixed = generate_cases(SamplingConfig.from_dict({"mode": "naca_codes", "codes": ["0012", "2412"],
+                                                     "alpha_values": [0, 8, 15]}))
+    assert [r["case_id"] for r in fixed][:3] == ["naca0012_a0", "naca0012_a8", "naca0012_a15"]
+
+
+def test_marching_alphas_for_xfoil():
+    assert marching_alphas([0, 8, 15], 1.0) == [float(a) for a in range(16)]
+    assert marching_alphas([0, 8, 15], 0) == [0.0, 8.0, 15.0]
+    assert marching_alphas([-4, 2], 2.0) == [-4.0, -2.0, 2.0]
 
 
 def test_validation_case_list():
@@ -439,3 +468,62 @@ def test_validate_xfoil_compares_turbulence_models(tmp_path):
     assert "error" in summary["by_model"]["kOmegaSSTLM"]      # SST-LM 결과는 아직 없음
     assert summary["recommended"] == "kOmegaSST"
     assert len(_read(tmp_path / "runs" / "validation" / "xfoil_polars.csv")) == 4
+
+
+def make_grid_project(tmp):
+    """NACA 코드 격자 (형상 8개 × 0·8·15°), 코드 0.1 m, SST 고정."""
+    path = make_project(tmp)
+    text = path.read_text()
+    text = text.replace("n_shapes = 4\nalpha_per_shape = 2\nm = [0.0, 6.0]",
+                        'mode = "naca_codes"\nn_shapes = 8\nalpha_values = [0, 8, 15]\nm = [0, 6]')
+    text = text.replace("[ml]", f'[validation.xfoil]\nexecutable = "{FAKE_XFOIL.as_posix()}"\n\n[ml]')
+    text = text.replace("split = [0.5, 0.25, 0.25]", 'split = [0.5, 0.25, 0.25]\nmodels = ["lgbm", "mlp"]\nfeatures = "mpt"')
+    path.write_text(text)
+    return path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="가짜 XFOIL 실행 스크립트(#!)는 POSIX 전용")
+def test_xfoil_vs_fluent_then_train_mlp_lgbm(tmp_path, capsys):
+    pytest.importorskip("lightgbm")
+    pytest.importorskip("torch")
+    cfg_path = make_grid_project(tmp_path)
+    args = ["--no-banner", "--no-clear", "-c", str(cfg_path)]
+    assert main(args + ["make-cases"]) == 0
+    cfg = load_config(cfg_path)
+    assert len(build_cases(cfg)) == 24
+
+    # 1. 해석툴(XFOIL)로 해석
+    assert main(args + ["xfoil"]) == 0
+    xf = _read(tmp_path / "runs" / "xfoil_production_main" / "results.csv")
+    assert list(xf[0])[:len(RESULT_COLUMNS)] == list(RESULT_COLUMNS)
+    assert len(xf) == 24 and all(r["turb_model"] == "xfoil" and r["converged"] == "True" for r in xf)
+    assert {float(r["alpha"]) for r in xf} == {0.0, 8.0, 15.0} and float(xf[0]["Re"]) == pytest.approx(1e5)
+
+    # ANSYS(가짜 Fluent) 해석 → 2. 비교
+    assert main(args + ["run"]) in (0, 1)
+    capsys.readouterr()
+    assert main(args + ["compare-solvers"]) == 0
+    out = capsys.readouterr().out
+    assert "XFOIL vs ANSYS Fluent" in out and "15°" in out
+    cmp_dir = cfg.output_dir / "compare_xfoil"
+    rows = _read(cmp_dir / "compare.csv")
+    assert len(rows) == 24 and (cmp_dir / "parity.png").is_file()
+    r = next(r for r in rows if r["both_converged"] == "True")
+    assert float(r["dCL"]) == pytest.approx(float(r["CL_xfoil"]) - float(r["CL_fluent"]))
+    summary = json.loads((cmp_dir / "summary.json").read_text())
+    assert set(summary["by_alpha"]) == {"0", "8", "15"}
+
+    # 3. MLP + LightGBM 학습 (정답 = ANSYS, 그리고 XFOIL)
+    assert main(args + ["dataset"]) == 0
+    assert main(args + ["train", "--epochs", "50", "--seeds", "2"]) == 0
+    run = json.loads((cfg.output_dir / "ml" / "mpt_h64x64" / "run.json").read_text())
+    assert run["features"] == ["m", "p", "t", "aoa"]          # Re 고정 → log10_re 빠짐
+    assert run["options"]["models"] == ["lgbm", "mlp"]
+    metrics = _read(cfg.output_dir / "ml" / "mpt_h64x64" / "metrics.csv")
+    assert {m["model"] for m in metrics} == {"lgbm", "mlp"}
+    assert main(args + ["dataset", "--source", "xfoil"]) == 0
+    ds_x = _read(cfg.output_dir / "dataset_xfoil" / "dataset.csv")
+    ds_f = _read(cfg.output_dir / "dataset" / "dataset.csv")
+    assert {r["shape"]: r["split"] for r in ds_x} == {r["shape"]: r["split"] for r in ds_f}  # 같은 형상 분할
+    assert main(args + ["train", "--source", "xfoil", "--epochs", "50", "--seeds", "2"]) == 0
+    assert (cfg.output_dir / "ml" / "mpt_h64x64_xfoil" / "metrics.csv").is_file()

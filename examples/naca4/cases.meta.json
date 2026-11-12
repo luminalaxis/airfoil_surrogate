@@ -2,21 +2,21 @@
   "generator": "afs make-cases",
   "sampling": {
     "seed": 2026,
-    "mode": "nested",
-    "n_shapes": 120,
+    "mode": "naca_codes",
+    "n_shapes": 100,
     "alpha_per_shape": 6,
     "n_cases": 720,
     "m": [
-      0.0,
-      6.0
+      0,
+      6
     ],
     "p": [
-      2.0,
-      6.0
+      2,
+      6
     ],
     "t": [
-      6.0,
-      18.0
+      6,
+      18
     ],
     "alpha": [
       0.0,
@@ -29,6 +29,12 @@
       "member4"
     ],
     "decimals": 4,
+    "alpha_values": [
+      0,
+      8,
+      15
+    ],
+    "codes": [],
     "validation": {
       "shapes": [
         "0012",
@@ -40,12 +46,12 @@
       ],
       "alpha": [
         0,
-        4,
-        8
+        8,
+        15
       ]
     }
   },
-  "list": "csv_validation",
-  "n_cases": 18,
-  "n_shapes": 6
+  "list": "csv",
+  "n_cases": 300,
+  "n_shapes": 100
 }

@@ -79,7 +79,7 @@ def run_checks(cfg: ProjectConfig, cases: list[Case], parallel: int | None = Non
             add(WARN, "유동 조건", w)
         add(INFO, "베이스 케이스 재질·리포트가 [flow]와 맞는지 확인",
             f"밀도 {cfg.flow.rho:g} kg/m³, 점성 {cfg.flow.rho * cfg.flow.nu:.5g} Pa·s, 리포트 cx, cy, cmz, yplus-max, "
-            "yplus-avg, inlet 난류 = named expression k_in, omega_in (docs/FLUENT_BASE_CASE_NACA_LHS.md)")
+            "yplus-avg, inlet 난류 = named expression k_in, omega_in (docs/FLUENT_BASE_CASE_NACA4.md)")
 
     # ---------------------------------------------------------------- 실행할 케이스
     run_cases = list(cases)
@@ -126,7 +126,7 @@ def run_checks(cfg: ProjectConfig, cases: list[Case], parallel: int | None = Non
             label = _set_label(cs)
             if path in missing:
                 add(TODO, f"베이스 케이스 만들기: {path.name}",
-                    f"{label}케이스 {len(cs)}개가 읽음. 베이스 케이스 문서(docs/FLUENT_BASE_CASE_NACA_LHS.md, "
+                    f"{label}케이스 {len(cs)}개가 읽음. 베이스 케이스 문서(docs/FLUENT_BASE_CASE_NACA4.md, "
                     f"예전 UIUC 예제는 FLUENT_BASE_CASE_AIRFOIL.md) 순서로 만들어 {path.parent} 에 저장")
             else:
                 add(OK, f"베이스 케이스 있음: {path.name}", f"{label}케이스 {len(cs)}개")

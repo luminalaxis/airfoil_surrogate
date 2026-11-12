@@ -1,0 +1,135 @@
+# NACA 4자리 100개 × 받음각 0·8·15° = 300 케이스 — 팀 공통 설정 (4명이 이 파일 하나로 실행)
+#   고정: 난류 모델 k-ω SST, 코드 길이 100 mm, Re 1e5 (U 14.6 m/s), 받음각 {0, 8, 15}° (모든 형상 동일)
+#
+#   0. afs make-cases                 cases.csv (NACA 4자리 100개, 시드 고정) + cases_validation.csv
+#   1. afs xfoil                      해석툴(XFOIL)로 300 케이스 해석 → runs/xfoil_production_main/results.csv
+#      afs run --assignee member1     ANSYS Fluent 해석 (각자 담당 형상 25개 × 3 = 75 케이스)
+#      afs collect                    runs/production_kOmegaSST_light_main/results.csv
+#      afs merge-results ...          팀원 결과 합치기
+#   2. afs compare-solvers            XFOIL vs ANSYS 같은 케이스 비교 (ΔCL, ΔCD, ΔCM, parity.png)
+#   3. afs dataset                    정답 = ANSYS (형상 단위 분할 70/15/15)
+#      afs train                      MLP + LightGBM, 입력 (m, p, t, α) → CL, log10 CD
+#      (XFOIL 정답으로도 학습: afs dataset --source xfoil → afs train --source xfoil)
+
+[project]
+name = "naca4"
+template = "journal.jou"
+output_dir = "runs"
+max_parallel = 1
+
+[solver]
+kind = "fluent"
+# executable = 'C:\Program Files\ANSYS Inc\v261\fluent\ntbin\win64\fluent.exe'
+mode = "2ddp"
+processes = 4
+graphics = false
+timeout_minutes = 30
+
+# ---------------------------------------------------------------- 유동 조건 (고정)
+[flow]
+re_mode = "production"
+mesh_mode = "light"              # light (본 데이터) / fine (메쉬 검증용: afs --mesh-mode fine run)
+turbulence_model = "kOmegaSST"   # 고정 (Fluent SST k-ω). base_cases에 SST만 있어 다른 모델은 실행되지 않음
+chord = 0.1                      # 코드 길이 100 mm 고정
+span = 1.0
+rho = 1.225
+nu = 1.4607e-5
+turbulence_intensity = 0.01
+length_scale = 0.01
+moment_ref = 0.25
+iterations = 3000
+base_cases = { kOmegaSST = "base_sst.cas.h5" }
+
+[flow.production]
+reynolds = 1.0e5                 # U = 14.6 m/s (유속으로 정하려면 reynolds 대신 velocity = 15.0)
+y_plus = 1.0
+wall_treatment = "low_re"
+naca_te = "blunt"
+
+[flow.validation]                # (선택) Airfoil2Vec 비교용. 코드 길이는 그대로 0.1 m
+reynolds = 4.66e6
+y_plus = 50
+wall_treatment = "wall_function"
+naca_te = "sharp"
+
+# ---------------------------------------------------------------- 케이스 목록 (afs make-cases)
+[sampling]
+seed = 2026
+mode = "naca_codes"              # NACA 4자리 정수 코드 n_shapes개 × 같은 받음각
+n_shapes = 100
+m = [0, 6]                       # 최대 캠버 [% c] 0~6  (m = 0이면 대칭익 00tt)
+p = [2, 6]                       # 최대 캠버 위치 [c/10] 2~6
+t = [6, 18]                      # 두께 [% c] 6~18      → 유효 코드 403개 중 100개
+alpha_values = [0, 8, 15]        # 받음각 [deg], 모든 형상 동일
+# codes = ["0012", "2412", ...]  # 형상을 직접 정하려면 (100개)
+assignees = ["member1", "member2", "member3", "member4"]
+
+[sampling.validation]
+shapes = ["0012", "2412", "4412", "0015", "2415", "4415"]
+alpha = [0, 8, 15]
+
+[cases]
+csv = "cases.csv"                        # case_id(예: naca2412_a8), shape_id, m, p, t, alpha, assignee
+csv_validation = "cases_validation.csv"
+name = "{case_id}"
+group = "{shape_id}"
+
+# ---------------------------------------------------------------- 메쉬
+[mesh]
+farfield_shape = "box"
+box_upstream = 20
+box_downstream = 40
+box_height = 20
+wake_angles = [-2, 4, 10, 16]    # 받음각 0~15°를 덮는 후류 세분화 방향 [deg]
+max_aspect_ratio = 2000
+max_non_orthogonality = 70
+min_orthogonal_quality = 0.05
+
+[mesh.light]                     # 본 데이터 (셀 약 2만)
+surface_cells = 120
+near_size = 0.015
+wake_size = 0.02
+growth_rate = 1.2
+box_far_size = 2.5
+
+[mesh.fine]                      # 메쉬 검증용 (셀 약 8만)
+surface_cells = 300
+near_size = 0.006
+wake_size = 0.008
+growth_rate = 1.1
+box_far_size = 1.5
+
+# ---------------------------------------------------------------- 수렴 판정
+[convergence]
+window = 200
+cl_tol = 0.005
+cl_rel_tol = 0.01
+cd_tol = 1e-4
+cd_rel_tol = 0.02
+residual_tol = 1e-5
+criteria = "both"            # 15°는 박리로 진동할 수 있음 → converged = False로 기록 (학습에서 제외)
+
+[results]
+report_files = ["*.out"]
+average_last = 200
+x_param = "alpha"
+wind_axes = true
+results_file = "results.csv"
+
+# ---------------------------------------------------------------- 해석툴 (XFOIL)
+[validation.xfoil]
+executable = "xfoil"         # PATH에 없으면 전체 경로 (예: 'C:\tools\xfoil\xfoil.exe')
+ncrit = 9
+iterations = 200
+alpha_step = 1.0             # 0° → 8° → 15°를 1° 간격으로 차례로 풀어 수렴을 돕는다
+timeout = 60
+
+# ---------------------------------------------------------------- 학습 (MLP + LightGBM)
+[ml]
+models = ["lgbm", "mlp"]
+features = "mpt"             # 입력 (m, p, t, α)
+shape_key = "shape_id"       # 형상 단위 분할: 같은 형상의 0·8·15°는 같은 분할에
+split = [0.70, 0.15, 0.15]   # 형상 70 / 15 / 15
+seed = 2026
+train_states = ["converged"]
+require_converged = true

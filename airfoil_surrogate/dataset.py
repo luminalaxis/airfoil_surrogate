@@ -53,6 +53,8 @@ class MLConfig:
     family_key: str = "family"
     re_key: str = "reynolds"
     tsst_summary: str = ""         # Transition SST로 다시 푼 케이스의 summary.csv (예: runs_tsst/summary.csv)
+    models: list = field(default_factory=lambda: ["baseline", "lgbm", "mlp"])  # afs train 기본 모델
+    features: str = "cst16"        # afs train 기본 형상 특성 (cst16 / cst8 / mpt)
     require_converged: bool = False  # true면 converged == False인 케이스를 학습·평가에서 뺀다 (건수는 보고)
 
     @classmethod
@@ -67,8 +69,30 @@ class MLConfig:
         return obj
 
 
-def dataset_dir(cfg: ProjectConfig) -> Path:
-    return cfg.output_dir / DATASET_DIR
+SOURCES = ("fluent", "xfoil")
+
+
+def dataset_dir(cfg: ProjectConfig, source: str = "fluent") -> Path:
+    """정답 출처별 데이터셋 폴더: fluent → dataset/, xfoil → dataset_xfoil/ (형상 분할은 같은 시드라 동일)."""
+    if source not in SOURCES:
+        raise ConfigError(f"정답 출처는 {' / '.join(SOURCES)} 중 하나여야 합니다: {source!r}")
+    return cfg.output_dir / (DATASET_DIR if source == "fluent" else f"{DATASET_DIR}_{source}")
+
+
+def _xfoil_summaries(cfg: ProjectConfig) -> dict[str, dict]:
+    """XFOIL results.csv → case_id별 summary 형식 (cl, cd, cm, 수렴 상태)."""
+    from .solver_compare import xfoil_dir
+    from .validate import read_results
+
+    path = xfoil_dir(cfg) / "results.csv"
+    if not path.is_file():
+        raise ConfigError(f"XFOIL 결과가 없습니다: {path}  (먼저 afs xfoil)")
+    out = {}
+    for r in read_results(path):
+        ok = bool(r.get("converged")) and isinstance(r.get("CL"), float) and isinstance(r.get("CD"), float)
+        out[r["case_id"]] = {"state": "done" if ok else "failed", "conv_state": "converged" if ok else "no_data",
+                             "converged": ok, "cl": r.get("CL"), "cd": r.get("CD"), "cm": r.get("CM")}
+    return out
 
 
 def shape_id(params: dict, ml: MLConfig) -> str:
@@ -198,9 +222,11 @@ def mark_near_stall(rows: list[dict], window: float, usable: set[str]) -> None:
         r["near_stall"] = int(b is not None and abs(r["aoa"] - b[1]) <= window + 1e-9)
 
 
-def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) -> dict:
+def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False, source: str = "fluent") -> dict:
+    """source: 정답 출처 fluent (ANSYS 해석, 케이스 폴더) / xfoil (afs xfoil 결과)."""
     ml = MLConfig.from_dict(cfg.ml)
-    out_dir = dataset_dir(cfg)
+    out_dir = dataset_dir(cfg, source)
+    xfoil = _xfoil_summaries(cfg) if source == "xfoil" else None
     out_dir.mkdir(parents=True, exist_ok=True)
 
     shapes: dict[str, dict] = {}
@@ -239,7 +265,10 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
 
     rows = []
     for c in cases:
-        r = summarize_case(cfg, c)
+        if xfoil is not None:
+            r = xfoil.get(c.params.get("case_id", c.name), {"state": "pending", "conv_state": "no_data"})
+        else:
+            r = summarize_case(cfg, c)
         sid = shape_id(c.params, ml)
         info = shapes[sid]
         if "error" in info:
@@ -254,7 +283,7 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
             "aoa": aoa, "reynolds": re, "log10_re": math.log10(re),
             "state": r.get("state", ""), "conv_state": r.get("conv_state", "no_data"),
             "conv_cl_std": r.get("conv_cl_std", ""), "conv_cd_std": r.get("conv_cd_std", ""),
-            "cl": cl, "cd": cd,
+            "cl": cl, "cd": cd, "cm": _num(r.get("cm")),
             "log10_cd": math.log10(cd) if cd is not None and cd > 0 else None,
             "avg_iters": r.get("avg_iters", ""),
             "converged": int(bool(r.get("converged")) and r.get("state") == "done"),
@@ -294,7 +323,7 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
         states[r["conv_state"]] = states.get(r["conv_state"], 0) + 1
     if moved:
         warnings.append(f"분할이 바뀐 형상 {len(moved)}개 (holdout_families 변경 등): {', '.join(moved[:5])}")
-    return {"dir": out_dir, "rows": labeled, "counts": counts, "states": states,
+    return {"dir": out_dir, "source": source, "rows": labeled, "counts": counts, "states": states,
             "near_stall": sum(r["near_stall"] for r in labeled), "warnings": warnings, "plot": plot,
             "yplus": {"n": len(yplus), "median": float(np.median(yplus)), "max": float(np.max(yplus))} if yplus else None,
             "tsst": tsst}

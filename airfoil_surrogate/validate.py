@@ -352,6 +352,21 @@ class XfoilConfig:
     n_points: int = 160        # XFOIL에 넘기는 좌표 점 수 (면당)
     cl_abs_tol: float = 0.05   # 모델 비교 표의 참고 판정
     cd_rel_tol: float = 0.20
+    alpha_step: float = 1.0    # 요청한 α까지 이 간격으로 차례로 풀어 간다 (높은 α 수렴용, 0이면 요청한 α만)
+
+
+def marching_alphas(alphas: list[float], step: float) -> list[float]:
+    """0°에서 요청한 α까지 step 간격으로 차례로 푸는 α 목록 (요청한 α 포함). XFOIL은 앞 해를 초기값으로 쓴다."""
+    want = sorted({float(a) for a in alphas})
+    if step <= 0:
+        return want
+    seq = set(want)
+    for a in want:
+        k = 1
+        while k * step < abs(a) - 1e-9:
+            seq.add(math.copysign(k * step, a))
+            k += 1
+    return sorted(seq)
 
 
 def xfoil_script(coord_file: str, polar_file: str, re: float, alphas: list[float], x: XfoilConfig) -> str:
@@ -397,12 +412,13 @@ def run_xfoil(xy: np.ndarray, name: str, re: float, alphas: list[float], x: Xfoi
         tmp = Path(tmp)
         lines = [name] + [f"{px:.7f} {py:.7f}" for px, py in xy]
         (tmp / "foil.dat").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        script = xfoil_script("foil.dat", "polar.txt", re, alphas, x)
+        script = xfoil_script("foil.dat", "polar.txt", re, marching_alphas(alphas, x.alpha_step), x)
         try:
             subprocess.run([exe], input=script, text=True, cwd=tmp, capture_output=True, timeout=x.timeout)
         except subprocess.TimeoutExpired:
             pass  # 수렴 못 한 α에서 멈추는 경우가 있어 그때까지 저장된 극선은 쓴다
-        return parse_polar(tmp / "polar.txt")
+        want = [float(a) for a in alphas]
+        return [r for r in parse_polar(tmp / "polar.txt") if any(abs(r["alpha"] - a) < 1e-3 for a in want)]
 
 
 def _shapes_and_alphas(cases) -> dict[str, dict]:

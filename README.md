@@ -42,17 +42,33 @@ pip install -e ".[validation]"
 
 명령은 `afs`(긴 이름 `airfoil-surrogate`도 같음)입니다. 터미널에서 실행하면 큰 글씨 로고 배너가 나오고(색 조합은 실행할 때마다 무작위), 화면을 먼저 지웁니다. 배너는 `--no-banner` 또는 `AFS_NO_BANNER=1`, 화면 지우기는 `--no-clear` 또는 `AFS_NO_CLEAR=1`, 색은 `NO_COLOR=1`로 끕니다. 파일·파이프로 출력을 넘기면 배너·색·화면 지우기가 자동으로 빠집니다.
 
-## 팀 파이프라인: NACA (m, p, t, α) 라틴 하이퍼큐브 (`examples/naca_lhs`)
+## 팀 파이프라인: NACA 4자리 100개 × α 0·8·15° (`examples/naca4`)
 
-4명이 **설정 파일 하나**(`examples/naca_lhs/project.toml`)로 같은 조건을 돌리는 본 데이터 생성 파이프라인입니다. 베이스 케이스는 [docs/FLUENT_BASE_CASE_NACA_LHS.md](docs/FLUENT_BASE_CASE_NACA_LHS.md).
+4명이 **설정 파일 하나**(`examples/naca4/project.toml`)로 같은 조건을 돌립니다. 베이스 케이스는 [docs/FLUENT_BASE_CASE_NACA4.md](docs/FLUENT_BASE_CASE_NACA4.md).
+
+| 항목 | 값 |
+|---|---|
+| 형상 | NACA 4자리 **100개** (m 0~6, p 2~6, t 6~18 범위의 유효 코드 403개 중 시드 고정 무작위, `[sampling] codes`로 직접 지정 가능) |
+| 받음각 | **0°, 8°, 15°** (모든 형상 동일) → 300 케이스, 담당자당 형상 25개 × 3 = 75 케이스 |
+| 고정 조건 | 난류 모델 **k-ω SST**, 코드 길이 **100 mm**, Re 10⁵ (U = 14.6 m/s) |
+| 해석 | 해석툴 **XFOIL** (Ncrit 9) / **ANSYS Fluent** 2D 정상 상태 |
+| 학습 | **MLP + LightGBM**, 입력 (m, p, t, α) → CL, log10 CD, 형상 단위 분할 70/15/15 |
 
 ```bash
-cd examples/naca_lhs
+cd examples/naca4
 ```
 
 ```bash
 afs make-cases
 ```
+
+**1. 해석툴(XFOIL)로 해석** — 300 케이스 전체, 0° → 15°를 1° 간격으로 차례로 풀어 수렴을 돕습니다. 수렴 못 한 α는 `converged = False`로 기록.
+
+```bash
+afs xfoil
+```
+
+ANSYS Fluent 해석 (각자 담당분, 끝나면 합치기):
 
 ```bash
 afs run --assignee member1
@@ -62,21 +78,39 @@ afs run --assignee member1
 afs merge-results results_all.csv member1/results.csv member2/results.csv member3/results.csv member4/results.csv
 ```
 
+**2. ANSYS 해석과 비교** — 같은 case_id끼리 ΔCL, ΔCD/CD, ΔCM을 α별·전체로 (MAE, 편향, R²) 정리하고 parity 그래프를 그립니다. 합친 파일을 쓰려면 `--fluent results_all.csv`.
+
+```bash
+afs compare-solvers
+```
+
+**3. MLP + LightGBM 학습** — 정답은 ANSYS(기본). `[ml] models = ["lgbm", "mlp"]`, `features = "mpt"`.
+
 ```bash
 afs dataset
 ```
 
 ```bash
-afs train --features mpt
+afs train
+```
+
+XFOIL 정답으로도 학습해 비교하려면 (형상 분할은 같음):
+
+```bash
+afs dataset --source xfoil
+```
+
+```bash
+afs train --source xfoil
 ```
 
 모드는 설정의 `[flow]`에서 정하고, 명령줄에서 덮어쓸 수 있습니다. 결과는 모드마다 `runs/<re_mode>_<난류 모델>_<메쉬 모드>_<케이스 목록>/`에 따로 쌓이고, 메쉬는 `runs/_meshes/`에서 난류 모델끼리 공유합니다.
 
 | 옵션 | 값 |
 |---|---|
-| `--re-mode` | `production` (Re 10⁵, c = 0.1 m, U = 14.6 m/s, y⁺ ≈ 1) / `validation` (Re 4.66×10⁶, c = 1 m, y⁺ ≈ 50, 뒷전 sharp) |
+| `--re-mode` | `production` (Re 10⁵, c = 0.1 m, U = 14.6 m/s, y⁺ ≈ 1) / `validation` (Re 4.66×10⁶, y⁺ ≈ 50, 뒷전 sharp, Airfoil2Vec 비교용) |
 | `--mesh-mode` | `light` (본 데이터, 약 2만 셀) / `fine` (검증, 약 8만 셀). `[mesh.light]`, `[mesh.fine]` |
-| `--turb` | `kOmegaSST` (Fluent SST k-ω) / `kOmegaSSTLM` (Fluent Transition SST) → `[flow] base_cases`의 베이스 케이스 |
+| `--turb` | `kOmegaSST` (Fluent SST k-ω). 이 예제는 SST 고정이라 `base_cases`에 SST만 있음 (Transition SST를 쓰려면 베이스 케이스를 추가) |
 | `--case-list` | `main` (`cases.csv`) / `validation` (`cases_validation.csv`, validation Re 모드의 기본값) |
 | `--assignee` | `cases.csv`의 담당자 열로 내 케이스만 (형상 단위로 배정돼 메쉬도 한 사람만 만듦) |
 
@@ -90,7 +124,7 @@ afs train --features mpt
 | 1 | 코사인 분포 | `geometry.naca4_mpt` |
 | 1 | (m, p, t) 실수 입력 | 케이스 변수 `m`, `p`, `t` (NACA 자리 단위: 2412 = 2, 4, 12) |
 | 1 | p = 0 예외 | m = 0 또는 p = 0 → 대칭익 (캠버 식 계산 안 함). m > 0인데 p = 0이면 명확한 오류 |
-| 2 | LHS (m, p, t, α) | `afs make-cases`: `nested`(형상 LHS × 형상마다 α 층화, 기본) / `joint`(4차원 LHS). 범위 m 0~6, p 2~6, t 6~18, α 0~12 (15° 포함은 `[sampling] alpha`로 결정) |
+| 2 | 케이스 목록 | `afs make-cases`: `naca_codes`(NACA 정수 코드 × 고정 α, 이 예제) / `nested`(형상 LHS × 형상마다 α 층화) / `joint`(4차원 LHS) |
 | 2 | 시드 고정 | `[sampling] seed`. 같은 설정이면 같은 파일, 내용이 다른 기존 파일은 `--force` 없이 덮어쓰지 않음 |
 | 2 | cases.csv | `case_id, shape_id, m, p, t, alpha, assignee` (+ `cases.meta.json`) |
 | 2 | 검증 목록 분리 | `cases_validation.csv`: `[sampling.validation]` 형상 6개 × α {0, 4, 8} |

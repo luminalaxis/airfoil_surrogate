@@ -18,6 +18,12 @@
     shapes = ["0012", "2412", "4412", "0015", "2415", "4415"]
     alpha = [0, 4, 8]
 
+고정 격자 모드 (mode = "naca_codes"): NACA 4자리 정수 코드 n_shapes개 × 고정 받음각 alpha_values
+    [sampling]
+    mode = "naca_codes"
+    n_shapes = 100           # m, p, t 범위 안의 유효한 코드 중 시드로 무작위 100개 (codes로 직접 줄 수도 있음)
+    alpha_values = [0, 8, 15]
+
 출력 열: case_id, shape_id, m, p, t, alpha, assignee (shape_id는 메쉬 공유·형상 단위 분할에 씀).
 담당자는 형상 단위로 번갈아 배정한다 (같은 형상의 α는 한 사람이 → 메쉬를 한 번만 만든다).
 """
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -55,6 +62,8 @@ class SamplingConfig:
     alpha: list = field(default_factory=lambda: [0.0, 12.0])
     assignees: list = field(default_factory=lambda: ["member1", "member2", "member3", "member4"])
     decimals: int = 4
+    alpha_values: list = field(default_factory=list)  # naca_codes 모드: 모든 형상에 같은 받음각
+    codes: list = field(default_factory=list)         # naca_codes 모드: 코드 직접 지정 (비우면 무작위 n_shapes개)
     validation: ValidationSet = field(default_factory=ValidationSet)
 
     @classmethod
@@ -68,8 +77,10 @@ class SamplingConfig:
         if unknown:
             raise ConfigError(f"[sampling.validation]에 알 수 없는 항목: {', '.join(sorted(unknown))}")
         obj = cls(**data, validation=ValidationSet(**val))
-        if obj.mode not in ("nested", "joint"):
-            raise ConfigError(f"[sampling] mode는 nested 또는 joint여야 합니다: {obj.mode!r}")
+        if obj.mode not in ("nested", "joint", "naca_codes"):
+            raise ConfigError(f"[sampling] mode는 nested, joint, naca_codes 중 하나여야 합니다: {obj.mode!r}")
+        if obj.mode == "naca_codes" and not obj.alpha_values:
+            raise ConfigError("[sampling] mode = naca_codes 이면 alpha_values(예: [0, 8, 15])를 지정하세요.")
         for name in ("m", "p", "t", "alpha"):
             lo, hi = getattr(obj, name)
             if not lo <= hi:
@@ -94,10 +105,44 @@ def _scale(u: np.ndarray, rng_: list) -> np.ndarray:
     return lo + u * (hi - lo)
 
 
+def valid_naca_codes(sc: SamplingConfig) -> list[str]:
+    """m, p, t 범위 안의 NACA 4자리 정수 코드 전부 (대칭익은 p = 0: 00tt)."""
+    out = []
+    for m in range(math.ceil(sc.m[0]), math.floor(sc.m[1]) + 1):
+        ps = [0] if m == 0 else range(max(1, math.ceil(sc.p[0])), min(9, math.floor(sc.p[1])) + 1)
+        for p in ps:
+            for t in range(max(1, math.ceil(sc.t[0])), math.floor(sc.t[1]) + 1):
+                out.append(f"{m}{p}{t:02d}")
+    return out
+
+
+def pick_naca_codes(sc: SamplingConfig) -> list[str]:
+    if sc.codes:
+        codes = [str(c).upper().removeprefix("NACA").strip().zfill(4) for c in sc.codes]
+        bad = [c for c in codes if len(c) != 4 or not c.isdigit()]
+        if bad or len(set(codes)) != len(codes):
+            raise ConfigError(f"[sampling] codes는 서로 다른 NACA 4자리 코드여야 합니다: {bad or '중복 있음'}")
+        return codes
+    pool = valid_naca_codes(sc)
+    if sc.n_shapes > len(pool):
+        raise ConfigError(f"[sampling] 범위 안의 NACA 코드가 {len(pool)}개뿐인데 n_shapes = {sc.n_shapes}입니다.")
+    rng = np.random.default_rng(sc.seed)
+    return sorted(rng.choice(pool, size=sc.n_shapes, replace=False).tolist())
+
+
 def generate_cases(sc: SamplingConfig) -> list[dict]:
     rng = np.random.default_rng(sc.seed)
     r = sc.decimals
     rows = []
+    if sc.mode == "naca_codes":
+        for code in pick_naca_codes(sc):
+            m, p, t = int(code[0]), int(code[1]), int(code[2:])
+            for alpha in sc.alpha_values:
+                rows.append({"shape_id": f"naca{code}", "m": m, "p": p, "t": t, "alpha": float(alpha)})
+        _assign(rows, sc.assignees)
+        for row in rows:
+            row["case_id"] = f"{row['shape_id']}_a{row['alpha']:g}"
+        return [{k: row[k] for k in CASE_COLUMNS} for row in rows]
     if sc.mode == "nested":
         u = latin_hypercube(sc.n_shapes, 3, rng)
         shapes = np.column_stack([_scale(u[:, 0], sc.m), _scale(u[:, 1], sc.p), _scale(u[:, 2], sc.t)])

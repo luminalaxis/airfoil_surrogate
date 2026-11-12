@@ -64,13 +64,18 @@ class TrainOptions:
     stall_weight: float = 1.0         # 실속 부근 학습 케이스 가중치 (개선 실험)
     ood_train_fraction: float = 0.0   # test_ood 형상 중 이 비율을 학습에 추가 (개선 실험)
     name: str | None = None
+    source: str = "fluent"            # 정답 출처: fluent (ANSYS) / xfoil
 
 
 def feature_columns(rows: list[dict], features: str) -> list[str]:
     if features == "mpt":
         if not all(k in rows[0] and rows[0][k] is not None for k in ("m", "p", "t")):
             raise ConfigError("데이터셋에 m, p, t 열이 없습니다 ((m, p, t) 케이스 목록으로 만든 데이터셋에서만 --features mpt).")
-        return ["m", "p", "t", "aoa", "log10_re"]
+        cols = ["m", "p", "t", "aoa"]
+        # Re가 한 값으로 고정된 데이터셋이면 log10_re는 정보가 없는 상수 열이라 뺀다
+        if len({r.get("log10_re") for r in rows}) > 1:
+            cols.append("log10_re")
+        return cols
     shape = [k for k in rows[0] if k.startswith(f"{features}_") and k[len(features) + 1] in "ul"
              and k[len(features) + 2:].isdigit()]
     if not shape:
@@ -319,7 +324,7 @@ def _split_rows(rows: list[dict], ml: MLConfig, opts: TrainOptions) -> dict[str,
 
 def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
     ml = MLConfig.from_dict(cfg.ml)
-    rows = load_dataset(dataset_dir(cfg) / "dataset.csv")
+    rows = load_dataset(dataset_dir(cfg, opts.source) / "dataset.csv")
     if not rows:
         raise ConfigError("데이터셋이 비어 있습니다 (완료된 케이스가 없음).")
     cols = feature_columns(rows, opts.features)
@@ -329,7 +334,8 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
         raise ConfigError(f"학습/검증 케이스가 부족합니다 (train {len(train_rows)}, val {len(val_rows)}).")
     weights = np.array([opts.stall_weight if r["near_stall"] else 1.0 for r in train_rows])
 
-    name = opts.name or f"{opts.features}_h{'x'.join(map(str, opts.hidden))}"
+    name = opts.name or f"{opts.features}_h{'x'.join(map(str, opts.hidden))}" + (
+        "" if opts.source == "fluent" else f"_{opts.source}")
     out_dir = cfg.output_dir / ML_DIR / name
     out_dir.mkdir(parents=True, exist_ok=True)
     usable = set(ml.train_states)

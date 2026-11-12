@@ -14,6 +14,8 @@
     afs compare A B     # 학습 결과끼리 같은 케이스로 비교 (실험 1·2, 개선 실험)
     afs edge-cases      # 경계 사례 10개 선정 + 사례별 그래프
     afs merge-results   # 팀원별 results.csv 합치기 (공통 스키마 확인)
+    afs xfoil           # 해석툴(XFOIL)로 같은 케이스 해석 → runs/xfoil_<모드>/results.csv
+    afs compare-solvers # XFOIL vs ANSYS Fluent 같은 케이스 비교 (ΔCL, ΔCD, ΔCM, parity 그래프)
     afs validate ...    # airfoil2vec (Re 4.66e6) / xfoil (Re 1e5, SST vs SST-LM) / mesh (light vs fine)
 
 모드 전환 (설정 파일의 [flow] 값을 덮어씀, 결과는 runs/<re_mode>_<난류 모델>_<메쉬 모드>_<케이스 목록>/):
@@ -349,12 +351,46 @@ def cmd_fetch_airfoils(args) -> int:
     return 1 if r["failed"] else 0
 
 
+def cmd_xfoil(args) -> int:
+    from .solver_compare import run_xfoil_cases
+
+    cfg, cases = _load(args)
+    print(f"XFOIL 해석: 케이스 {len(cases)}개 (Re {cfg.flow.Re:,.0f}, 코드 {cfg.flow.chord:g} m)")
+    r = run_xfoil_cases(cfg, cases)
+    print(f"\n결과: {r['path']}  ({r['rows']}개 케이스, 수렴 {r['converged']}개, 형상 {r['shapes']}개)")
+    return 0
+
+
+def cmd_compare_solvers(args) -> int:
+    from pathlib import Path
+
+    from .solver_compare import compare_solvers
+
+    cfg = _cfg(args)
+    r = compare_solvers(cfg, Path(args.fluent) if args.fluent else None, Path(args.xfoil) if args.xfoil else None,
+                        plots=not args.no_plots)
+    s = r["summary"]
+    print(f"XFOIL vs ANSYS Fluent: 공통 케이스 {s['cases']}개, 둘 다 수렴 {s['both_converged']}개 "
+          f"(Fluent 미수렴 {s['fluent_not_converged']}, XFOIL 미수렴 {s['xfoil_not_converged']})")
+    print("차이 = XFOIL − Fluent.  MAE = 평균 절대 차이, rel = Fluent 대비 상대 차이, R² = Fluent를 정답으로 본 결정계수\n")
+    print(f"{'α':>6}{'n':>5}  {'MAE CL':>8}{'bias CL':>9}{'R² CL':>7}  {'MAE CD':>9}{'rel CD':>8}{'R² CD':>7}  {'MAE CM':>8}")
+    for label, st in [("전체", s["all"])] + [(f"{a}°", v) for a, v in s["by_alpha"].items()]:
+        if "CL" not in st:
+            continue
+        cl, cd, cm = st["CL"], st["CD"], st.get("CM", {})
+        print(f"{label:>6}{st['n']:>5}  {cl['mae']:>8.4f}{cl['bias']:>+9.4f}{cl['r2']:>7.3f}  {cd['mae']:>9.5f}"
+              f"{_pct(cd['mean_abs_rel']):>8}{cd['r2']:>7.3f}  {cm.get('mae', float('nan')):>8.4f}")
+    print(f"\n결과: {r['dir']}  (compare.csv, summary.json, parity.png)")
+    return 0
+
+
 def cmd_dataset(args) -> int:
     from .dataset import build_dataset
 
     cfg, cases = _load(args)
-    r = build_dataset(cfg, cases, resplit=args.resplit)
-    print(f"데이터셋: {r['dir']}  (dataset.csv, airfoils.csv, split.json, cst_fits.png)")
+    r = build_dataset(cfg, cases, resplit=args.resplit, source=args.source)
+    print(f"데이터셋 (정답: {'ANSYS Fluent' if r['source'] == 'fluent' else 'XFOIL'}): {r['dir']}  "
+          "(dataset.csv, airfoils.csv, split.json, cst_fits.png)")
     print("분할       형상   케이스")
     for split, c in r["counts"].items():
         print(f"  {split:<9} {c['shapes']:>4}  {c['cases']:>6}")
@@ -391,12 +427,16 @@ def cmd_train(args) -> int:
     from .learn import PI_TAG, TrainOptions, train
 
     cfg = _cfg(args)
-    opts = TrainOptions(models=args.model, features=args.features,
+    from .dataset import MLConfig
+
+    ml = MLConfig.from_dict(cfg.ml)
+    opts = TrainOptions(models=args.model or ml.models, source=args.source, features=args.features or ml.features,
                         hidden=[int(h) for h in args.hidden.split(",") if h],
                         n_seeds=args.seeds, epochs=args.epochs, stall_weight=args.stall_weight,
                         ood_train_fraction=args.ood_train_fraction, name=args.name)
     r = train(cfg, opts)
-    print(f"학습 케이스 {r['n_train']}개, 검증 {r['n_val']}개, 입력 {len(r['features'])}개 ({opts.features} + aoa + log10_re)")
+    print(f"정답: {'ANSYS Fluent' if opts.source == 'fluent' else 'XFOIL'}, 모델: {', '.join(opts.models)}")
+    print(f"학습 케이스 {r['n_train']}개, 검증 {r['n_val']}개, 입력 {len(r['features'])}개 ({', '.join(r['features'][-4:])} 등)")
     if r["moved"]:
         print(f"test_ood 형상 {len(r['moved'])}개를 학습에 추가: {', '.join(r['moved'])}")
     print(f"[ ] = 형상 단위 부트스트랩 95% 신뢰구간, PI{PI_TAG} = {PI_TAG}% 예측 구간 (CL)")
@@ -554,11 +594,21 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="이미 있는 파일도 다시 받기")
     p = add("dataset", cmd_dataset, "학습용 데이터셋 (CST 계수, 수렴 상태, 형상 단위 분할)")
     p.add_argument("--resplit", action="store_true", help="split.json을 무시하고 형상 분할을 새로 함")
+    p.add_argument("--source", default="fluent", choices=["fluent", "xfoil"],
+                   help="정답 출처: fluent (ANSYS 해석, 기본) / xfoil (afs xfoil 결과)")
+    p = add("xfoil", cmd_xfoil, "해석툴(XFOIL)로 케이스 목록 전체 해석 (같은 Re, 형상, α)")
+    p = sub.add_parser("compare-solvers", help="XFOIL vs ANSYS Fluent 같은 케이스 비교")
+    p.add_argument("--fluent", help="Fluent results.csv (기본: 현재 모드의 결과 폴더)")
+    p.add_argument("--xfoil", help="XFOIL results.csv (기본: afs xfoil 결과)")
+    p.add_argument("--no-plots", action="store_true", help="그래프 없이 CSV만")
+    p.set_defaults(func=cmd_compare_solvers)
     p = sub.add_parser("train", help="회귀 모델 학습·평가 (dataset 결과 사용)")
-    p.add_argument("--model", nargs="+", default=["baseline", "lgbm", "mlp"],
-                   choices=["baseline", "lgbm", "mlp"], help="학습할 모델 (기본: 셋 다)")
-    p.add_argument("--features", default="cst16", choices=["cst16", "cst8", "mpt"],
-                   help="형상 특성: cst16(CST 면당 8개), cst8(면당 4개), mpt(NACA m, p, t)")
+    p.add_argument("--model", nargs="+", choices=["baseline", "lgbm", "mlp"],
+                   help="학습할 모델 (기본: [ml] models, 없으면 셋 다)")
+    p.add_argument("--source", default="fluent", choices=["fluent", "xfoil"],
+                   help="정답 출처: fluent (ANSYS) / xfoil (afs dataset --source 로 먼저 만든 데이터셋)")
+    p.add_argument("--features", choices=["cst16", "cst8", "mpt"],
+                   help="형상 특성: cst16(CST 면당 8개), cst8(면당 4개), mpt(NACA m, p, t). 기본: [ml] features")
     p.add_argument("--hidden", default="64,64", help="MLP 은닉층 크기 (예: 32,32 / 128,128,128)")
     p.add_argument("--seeds", type=int, default=5, help="MLP 앙상블 시드 수")
     p.add_argument("--epochs", type=int, default=2000, help="MLP 최대 에폭 (검증 손실로 조기 종료)")
