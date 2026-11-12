@@ -12,6 +12,7 @@
     afs train           # 기준 방법 / LightGBM / MLP 학습·조건별 평가 → runs/ml/
     afs compare A B     # 학습 결과끼리 같은 케이스로 비교 (실험 1·2, 개선 실험)
     afs edge-cases      # 경계 사례 10개 선정 + 사례별 그래프
+    afs predict IN.csv  # 학습한 모델로 새 익형·조건의 CL, CD 예측 (+ 90% 예측 구간, 외삽 표시)
 """
 
 from __future__ import annotations
@@ -268,24 +269,29 @@ def cmd_train(args) -> int:
     opts = TrainOptions(models=args.model, features=args.features,
                         hidden=[int(h) for h in args.hidden.split(",") if h],
                         n_seeds=args.seeds, epochs=args.epochs, stall_weight=args.stall_weight,
-                        ood_train_fraction=args.ood_train_fraction, name=args.name)
+                        ood_train_fraction=args.ood_train_fraction, name=args.name,
+                        pi_calibration=args.pi_calibration)
     r = train(cfg, opts)
     print(f"학습 케이스 {r['n_train']}개, 검증 {r['n_val']}개, 입력 {len(r['features'])}개 ({opts.features} + aoa + log10_re)")
     if r["moved"]:
         print(f"test_ood 형상 {len(r['moved'])}개를 학습에 추가: {', '.join(r['moved'])}")
-    print(f"[ ] = 형상 단위 부트스트랩 95% 신뢰구간, PI{PI_TAG} = {PI_TAG}% 예측 구간 (CL)")
+    print(f"[ ] = 형상 단위 부트스트랩 95% 신뢰구간, PI{PI_TAG} = {PI_TAG}% 예측 구간 (CL"
+          + (", val 케이스로 컨포멀 보정)" if opts.pi_calibration == "conformal" else ", 보정 없음)"))
     print(f"\n{'model':<9}{'split':<10}{'condition':<12}{'n':>6}  {'MAE CL [95% CI]':<27}{'MAE log10CD [95% CI]':<27}"
           f"{'PI' + PI_TAG + ' width':>11}  {'PI' + PI_TAG + ' cover [95% CI]':<20}")
     for m in r["metrics"]:
         if m["condition"].startswith("state="):
             continue
         width = f"{m[f'width{PI_TAG}_cl']:.3f}" if f"width{PI_TAG}_cl" in m else "-"
-        print(f"{m['model']:<9}{m['split']:<10}{m['condition']:<12}{m['n']:>6}  {_ci(m, 'mae_cl', '.3f'):<27}"
+        split = m["split"] + ("" if m.get("held_out", 1) else "*")
+        print(f"{m['model']:<9}{split:<10}{m['condition']:<12}{m['n']:>6}  {_ci(m, 'mae_cl', '.3f'):<27}"
               f"{_ci(m, 'mae_log10_cd', '.3f'):<27}{width:>11}  {_ci(m, f'cover{PI_TAG}_cl', '.2f'):<20}")
+    print("* val은 조기 종료와 예측 구간 보정에 쓰여 낙관적입니다. 성능 보고는 test, test_ood로 하세요.")
     if any(r["diverged"].values()):
         print("\n발산(diverged) 케이스는 학습·평가에서 빼고 건수만 보고: "
               + ", ".join(f"{s} {n}" for s, n in r["diverged"].items()))
-    print(f"\n결과: {r['dir']}  (metrics.csv: 수렴 상태별 포함, predictions.csv, run.json)")
+    print(f"\n결과: {r['dir']}  (metrics.csv: 수렴 상태별 포함, predictions.csv, run.json, models/)")
+    print(f"새 익형 예측: afs predict 입력.csv --run {r['dir'].name}")
     for w in r.get("warnings", []):
         print(f"[경고] {w}")
     return 0
@@ -357,6 +363,30 @@ def cmd_edge_cases(args) -> int:
     return 0
 
 
+def cmd_predict(args) -> int:
+    from pathlib import Path
+
+    from .predict import predict
+
+    cfg = load_config(args.config)
+    r = predict(cfg, args.run, Path(args.input).resolve(), args.model,
+                Path(args.out).resolve() if args.out else None)
+    print(f"{len(r['rows'])}개 조건 예측 ({args.run}: {', '.join(r['models'])})")
+    head = r["models"][-1]
+    print(f"\n{'airfoil':<24}{'aoa':>7}{'Re':>12}{'CL':>9}{'CL ' + 'PI90':>19}{'CD':>10}{'L/D':>8}  외삽")
+    for o in r["rows"][:20]:
+        pi = (f"[{o[f'{head}_cl_lo']:.3f}, {o[f'{head}_cl_hi']:.3f}]" if f"{head}_cl_lo" in o else "-")
+        print(f"{str(o['airfoil'])[:23]:<24}{o['aoa']:>7g}{o['reynolds']:>12,.0f}{o[f'{head}_cl']:>9.3f}{pi:>19}"
+              f"{o[f'{head}_cd']:>10.5f}{o[f'{head}_l/d']:>8.1f}  {o['extrapolation'] or '-'}")
+    if len(r["rows"]) > 20:
+        print(f"  ... ({len(r['rows']) - 20}행 더)")
+    print(f"(표는 {head} 모델. 전체 모델 결과는 CSV)")
+    for w in r["warnings"]:
+        print(f"[경고] {w}")
+    print(f"\n결과: {r['path']}")
+    return 0
+
+
 def _safe_console() -> None:
     """출력을 파일로 넘길 때(예: afs run > log.txt) 한국어 Windows 기본 인코딩(cp949)에 없는
     문자(−, ≈ 등)가 나와도 멈추지 않도록, 표현할 수 없는 문자는 ?로 바꿔 쓴다."""
@@ -420,6 +450,8 @@ def main(argv=None) -> int:
     p.add_argument("--ood-train-fraction", type=float, default=0.0,
                    help="처음 보는 형상(test_ood) 중 학습에 추가할 비율 (개선 실험)")
     p.add_argument("--name", help="결과 폴더 이름 (기본: 특성_은닉층)")
+    p.add_argument("--pi-calibration", default="conformal", choices=["conformal", "none"],
+                   help="예측 구간 보정: conformal(기본, val 케이스로 90%% 포함률 맞춤) / none(모델 그대로)")
     p.set_defaults(func=cmd_train)
     p = sub.add_parser("compare", help="학습 결과끼리 같은 케이스·같은 지표로 비교 (실험 1·2, 개선 실험)")
     p.add_argument("runs", nargs="+", metavar="RUN", help="runs/ml/ 아래 결과 폴더 이름. 첫 번째가 기준")
@@ -432,6 +464,12 @@ def main(argv=None) -> int:
     p.add_argument("--model", default="mlp", choices=["baseline", "lgbm", "mlp"], help="분석할 모델 (기본: mlp)")
     p.add_argument("--no-plots", action="store_true", help="그래프 없이 CSV만")
     p.set_defaults(func=cmd_edge_cases)
+    p = sub.add_parser("predict", help="학습한 모델로 새 익형·조건 예측 (입력 CSV: airfoil, aoa, reynolds)")
+    p.add_argument("input", help="입력 CSV (열: airfoil, aoa, reynolds)")
+    p.add_argument("--run", default="cst16_h64x64", help="runs/ml/ 아래 학습 결과 이름 (기본: cst16_h64x64)")
+    p.add_argument("--model", nargs="+", choices=["baseline", "lgbm", "mlp"], help="쓸 모델 (기본: 저장된 모델 전부)")
+    p.add_argument("--out", help="출력 CSV 경로 (기본: runs/ml/<실행>/predict_<입력 이름>.csv)")
+    p.set_defaults(func=cmd_predict)
 
     _safe_console()
     # 도움말(-h)도 지운 화면에 나오도록 인자 해석 전에 지운다 (터미널일 때만)

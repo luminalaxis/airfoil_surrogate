@@ -318,7 +318,12 @@ def test_dataset_and_training_workflow(tmp_path, capsys):
     div = by[("lgbm", "test_ood", "state=diverged")]
     assert div["n"] == "1" and div["mae_cl"] == "" and "건수만 보고: val 0, test 0, test_ood 1" in text
     preds = list(csv.DictReader((tmp_path / "runs" / "ml" / "t16" / "predictions.csv").open(encoding="utf-8-sig")))
-    assert {"baseline_cl", "lgbm_cl_lo", "mlp_log10_cd_hi", "yplus_max", "d_cl_tsst"} <= set(preds[0])
+    assert {"baseline_cl", "lgbm_cl_lo", "mlp_log10_cd_hi", "yplus_max", "d_cl_tsst",
+            "lgbm_cl_lo_raw", "mlp_cl_std"} <= set(preds[0])
+    assert "baseline_cl_lo" not in preds[0]                            # 이론식은 구간 없음
+    assert by[("mlp", "val", "all")]["held_out"] == "0" and by[("mlp", "test", "all")]["held_out"] == "1"
+    run = json.loads((tmp_path / "runs" / "ml" / "t16" / "run.json").read_text(encoding="utf-8"))
+    assert run["pi_calibration"]["mlp"]["cl"]["method"] == "scaled" and run["pi_calibration"]["lgbm"]["cl"]["method"] == "cqr"
     assert "naca6415_Re200000_a16" not in {p["case"] for p in preds}
 
     # 실험 1 (형상 계수 8개), 개선 실험 (처음 보는 형상 일부를 학습에 추가)
@@ -367,6 +372,28 @@ def test_dataset_and_training_workflow(tmp_path, capsys):
     pair = {e["pick"]: float(e["error_score"]) for e in edges if e["category"] == "attached_test"}
     assert pair["worst"] >= pair["typical"]   # 범주 안에서 최악 사례의 오차 점수가 대표 사례 이상
     assert all((edge_dir / e["figure"]).is_file() for e in edges)
+
+    # 저장한 모델로 다시 예측하면 학습 때 예측(predictions.csv)과 같다 (보정 구간 포함)
+    t16 = tmp_path / "runs" / "ml" / "t16"
+    assert (t16 / "models" / "model.json").is_file()
+    sample = [p for p in preds if p["eval_split"] == "test"][:3] + [p for p in preds if p["eval_split"] == "test_ood"][:2]
+    with (tmp_path / "new.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["case", "airfoil", "aoa", "reynolds"])
+        spec = {name: code for name, code, _ in AIRFOILS}
+        for p in sample:
+            w.writerow([p["case"], spec[p["shape"]], p["aoa"], p["reynolds"]])
+    capsys.readouterr()
+    assert main(["-c", str(cfg_path), "predict", str(tmp_path / "new.csv"), "--run", "t16"]) == 0
+    out = list(csv.DictReader((t16 / "predict_new.csv").open(encoding="utf-8-sig")))
+    for p, o in zip(sample, out):
+        assert o["case"] == p["case"]
+        for key in ("baseline_cl", "lgbm_cl", "lgbm_cl_lo", "mlp_cl", "mlp_log10_cd", "mlp_cl_hi"):
+            assert float(o[key]) == pytest.approx(float(p[key]), rel=1e-5, abs=1e-6), key
+        assert float(o["mlp_cd"]) == pytest.approx(10 ** float(o["mlp_log10_cd"]))
+    # 받음각·Re는 학습 범위 안 (형상 계수는 학습 형상이 적어 일부가 범위 밖일 수 있음)
+    assert not any(k in o["extrapolation"].split(",") for o in out for k in ("aoa", "log10_re"))
+
 
 
 def test_shape_bootstrap_ci_and_pairing():
@@ -437,3 +464,33 @@ def test_tiny_trailing_edge_gap_is_closed(tmp_path):
     el = load_section("gap.dat", tmp_path, "main")
     assert el.sharp_te
     assert not load_section("2412", tmp_path, "main").sharp_te  # 표준 NACA(뒷전 두께 0.0025c)는 그대로
+
+
+def test_conformal_calibration_coverage():
+    from airfoil_surrogate.learn import apply_calibration, conformal_quantile, fit_calibration
+
+    rng = np.random.default_rng(1)
+    n = 4000
+    y = rng.normal(0, 1, n) * np.r_[np.full(n // 2, 0.5), np.full(n // 2, 2.0)]   # 잡음 크기가 다름
+    std = np.r_[np.full(n // 2, 0.05), np.full(n // 2, 0.2)]                          # 앙상블 표준편차: 비율만 맞고 너무 작음
+    rows = [{"cl": v, "log10_cd": v} for v in y]
+    idx = rng.permutation(n)
+    val, test = idx[:1000], idx[1000:]
+
+    def sub(d, i):
+        return {k: v[i] for k, v in d.items()}
+
+    for preds in ({t: np.zeros(n) for t in ("cl", "log10_cd")} | {f"{t}_std": std for t in ("cl", "log10_cd")},
+                  {t: np.zeros(n) for t in ("cl", "log10_cd")} | {f"{t}_{s}": np.full(n, v) for t in ("cl", "log10_cd")
+                                                                   for s, v in (("lo", -0.1), ("hi", 0.1))},
+                  {t: np.zeros(n) for t in ("cl", "log10_cd")}):
+        cal = fit_calibration(sub(preds, val), [rows[i] for i in val])
+        out = apply_calibration(sub(preds, test), cal)
+        cover = np.mean((y[test] >= out["cl_lo"]) & (y[test] <= out["cl_hi"]))
+        assert 0.87 <= cover <= 0.93, (cal["cl"]["method"], cover)
+        if "cl_std" in preds:   # 정규화 점수: 잡음이 큰 쪽 구간이 더 넓다
+            assert cal["cl"]["method"] == "scaled"
+            assert np.mean((out["cl_hi"] - out["cl_lo"])[std[test] > 0.1]) > np.mean((out["cl_hi"] - out["cl_lo"])[std[test] < 0.1])
+        if "cl_lo" in preds:
+            assert cal["cl"]["method"] == "cqr" and "cl_lo_raw" in out
+    assert conformal_quantile(np.arange(5.0)) == 4.0   # 표본이 적으면 최댓값 (⌈6·0.9⌉/5 > 1)

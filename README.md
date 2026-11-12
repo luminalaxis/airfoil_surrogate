@@ -14,6 +14,7 @@ project.toml (익형 × 받음각 × Re)
    │ collect summary.csv (cl, cd, 수렴 상태 conv_state, y+)
    │ dataset CST 계수 + 형상 단위 분할 → runs/dataset/
    │ train   기준 방법 / LightGBM / MLP → runs/ml/<이름>/   (compare, edge-cases)
+   │ predict 저장한 모델로 새 익형·조건 CL, CD 예측 (90% 예측 구간, 외삽 표시)
    ▼
 runs/summary.csv, runs/dataset/, runs/ml/
 ```
@@ -92,6 +93,10 @@ afs train               # 기준 방법 / LightGBM / MLP → runs/ml/cst16_h64x6
 afs edge-cases          # 경계 사례 10개 + 사례별 그래프 → runs/ml/cst16_h64x64/edge_cases_mlp/
 ```
 
+```bash
+afs predict new.csv     # 저장한 모델로 새 익형·조건 예측 → runs/ml/cst16_h64x64/predict_new.csv
+```
+
 실험 1·2와 14주차 개선 실험은 아래 "학습과 평가"의 표대로 학습한 뒤 `afs compare`로 비교합니다.
 
 - UIUC 사이트에 접속이 안 되면 `coord_seligFmt.zip`(UIUC 전체 묶음)을 받아 `afs fetch-airfoils --zip coord_seligFmt.zip`. 내려받은 `airfoils/*.dat`은 팀원이 같은 좌표를 쓰도록 커밋해 두는 것을 권장합니다.
@@ -134,13 +139,27 @@ afs edge-cases          # 경계 사례 10개 + 사례별 그래프 → runs/ml/
 | 모델 | 내용 |
 |---|---|
 | `baseline` | 얇은 익형 이론 CL = 2π(α − α0), α0는 형상의 캠버선에서 계산. log10 CD = 학습 데이터 평균 |
-| `lgbm` | LightGBM. 목표별 평균 모델 + 분위 회귀(5%, 95%) → 90% 예측 구간. 검증 손실로 조기 종료 |
-| `mlp` | PyTorch MLP(SiLU), 시드만 다른 5개 앙상블. 평균 = 예측, 앙상블 표준편차 × 1.645 → 90% 예측 구간 |
+| `lgbm` | LightGBM. 목표별 평균 모델 + 분위 회귀(5%, 95%) → 90% 예측 구간(val로 컨포멀 보정). 검증 손실로 조기 종료 |
+| `mlp` | PyTorch MLP(SiLU), 시드만 다른 5개 앙상블. 평균 = 예측, 앙상블 표준편차로 만든 90% 예측 구간(val로 컨포멀 보정) |
+
+### 예측 구간 보정 (`--pi-calibration conformal`, 기본)
+
+앙상블 표준편차(× 1.645)는 모델 불확실성만 담고 정답 자체의 흔들림(진동 케이스 등)은 담지 못하며, 분위 회귀 구간도 데이터가 작으면 좁게 나와 **실제 포함률이 90%보다 낮아집니다.** 그래서 학습 뒤 `val` 케이스로 분할 컨포멀 보정을 합니다.
+
+| 모델 | 점수 | 보정된 구간 |
+|---|---|---|
+| `mlp` (시드 2개 이상) | \|y − 평균\| / (표준편차 + β), β = val 표준편차 중앙값 | 평균 ± q·(표준편차 + β) |
+| `mlp` (시드 1개) | \|y − 평균\| | 평균 ± q (폭 일정) |
+| `lgbm` | CQR: max(하한 − y, y − 상한) | [하한 − q, 상한 + q] |
+
+q는 val 점수의 ⌈(n+1)·0.9⌉/n 분위수입니다. 보정 값은 `run.json`의 `pi_calibration`에, 보정 전 구간은 `predictions.csv`의 `*_lo_raw`, `*_hi_raw`에 남습니다. 기획서의 원래 정의(표준편차 × 1.645, 분위 회귀 그대로)로 보고하려면 `--pi-calibration none`을 쓰세요. 이론식(`baseline`)은 구간을 내지 않습니다.
+
+**한계**: 보정은 val과 같은 분포, 곧 학습에 쓴 family의 처음 보는 형상에서만 90%를 보장합니다. 학습하지 않은 family(`test_ood`)는 학습 형상 범위 밖이라 포함률이 크게 낮을 수 있고, 특히 LightGBM 같은 트리 모델은 학습 범위 밖에서 예측이 평평해져 구간이 정답을 놓칩니다. `train`은 `test_ood` 포함률이 목표보다 15%p 넘게 낮으면 경고합니다. 보고서에는 `test`와 `test_ood` 포함률을 따로 적으세요.
 
 `metrics.csv`에는 모델 × 분할(`val`, `test`, `test_ood`) × 조건마다 표본 수(`n`, `n_shapes`), `mae_cl`, `mae_log10_cd`, 90% 예측 구간 폭(`width90_*`)과 실제 포함률(`cover90_*`)이 들어가고, MAE와 포함률마다 **형상 단위 부트스트랩 95% 신뢰구간**(`*_lo95`, `*_hi95`)이 붙습니다. 같은 형상의 받음각·Re 케이스는 서로 독립이 아니므로 케이스가 아니라 형상을 복원 추출(2,000회)해 구간을 구합니다.
 조건은 `all`(학습에 쓰는 수렴 상태 전체), 유동 구간 `attached`(CL 최대 받음각 − 창보다 작은 받음각, 부착 유동)·`near_stall`(CL 최대 받음각 ± 창)·`post_stall`(+ 창보다 큰 받음각, 실속 후 박리 유동), `state=converged/oscillating`(수렴 상태별)이고, `state=diverged`는 건수(`n`)만 있습니다. 유동 구간은 CFD 정답(CL 최대 받음각)을 알아야 정해지므로 평가 조건으로만 쓰고 모델 입력에는 넣지 않습니다.
 `predictions.csv`는 케이스별 정답·예측·구간과 진동 폭, y+, Transition SST 정답(있으면), `run.json`은 설정과 MLP 앙상블 멤버별 조기 종료 지점입니다.
-`val`은 조기 종료에 쓰이므로 최종 보고에는 `test`와 `test_ood`를 쓰세요.
+`val`은 조기 종료와 예측 구간 보정에 쓰이므로 지표가 낙관적입니다(`metrics.csv`의 `held_out = 0`, `train` 출력의 `val*`). 최종 보고에는 `test`와 `test_ood`를 쓰세요.
 
 기획서의 실험은 옵션으로 학습하고(결과 폴더 이름은 `--name`), `compare`로 같은 케이스끼리 비교합니다.
 
@@ -153,6 +172,19 @@ afs edge-cases          # 경계 사례 10개 + 사례별 그래프 → runs/ml/
 | 개선 2: 처음 보는 계열 일부 학습 | `afs train --ood-train-fraction 0.3 --name imp_ood30` | `afs compare cst16_h64x64 imp_ood30 --model lgbm mlp` |
 
 `[ml]` 설정: `holdout_families`, `split`(3개 비율), `seed`, `near_stall_window`, `train_states`(학습·`all` 조건에 쓰는 수렴 상태, 기본 converged + oscillating), `cst_orders`(면당 계수 수 목록, 기본 `[8, 4]`), `shape_key`(형상 이름 변수, 기본 `airfoil`), `family_key`, `re_key`, `tsst_summary`(Transition SST 결과, 아래 참고).
+
+## 새 익형 예측 (`afs predict`)
+
+`train`은 학습한 모델을 `runs/ml/<이름>/models/`(`model.json`, LightGBM 모델 파일, `mlp.pt`)에 저장합니다. 이 모델로 CFD를 돌리지 않고 새 익형·조건의 CL, CD를 예측합니다.
+
+```bash
+afs predict new.csv --run cst16_h64x64          # --model mlp 로 모델 선택, --out 으로 출력 경로
+```
+
+입력 CSV 열은 `airfoil`(NACA 4자리 코드 또는 project.toml 기준 좌표 파일 경로), `aoa`, `reynolds`이고, 그 밖의 열(예: `name`)은 출력에 그대로 붙습니다. 출력에는 모델별 `cl`, `cd`, `log10_cd`, `l/d`, 90% 예측 구간(`*_lo`, `*_hi`, 보정 적용)과 함께 다음이 들어갑니다.
+
+- `extrapolation`: 학습 데이터 범위(최솟값~최댓값) 밖인 입력 이름(`aoa`, `log10_re`, 형상 계수). 비어 있지 않으면 외삽이므로 예측과 구간을 믿기 어렵습니다. 학습 형상이 적으면 형상 계수 일부가 범위 밖으로 나오기 쉽습니다.
+- `cst_max_err`: 형상의 CST 피팅 최대 오차 [c]. 0.005c를 넘으면 경고합니다.
 
 ## 실행 간 비교 (`afs compare` → `runs/ml/_compare/<이름>.csv`)
 
@@ -275,7 +307,7 @@ afs -c project_mesh.toml gci
 | `runs/_meshes/<형상>/` | `geometry.png`, `mesh.png`, `mesh_le.png`, `mesh_domain.png`(전체 영역), `mesh_info.json` |
 | `runs/<그룹>/<케이스>/` | `convergence.png`(리포트 수렴 이력), `transcript.txt`(Fluent 출력), `solver.log`(표준 출력), `result.cas.h5` |
 | `runs/dataset/` | `dataset.csv`, `airfoils.csv`, `split.json`, `cst_fits.png` (위 "데이터셋") |
-| `runs/ml/<이름>/` | `metrics.csv`, `predictions.csv`, `run.json`, `edge_cases_<모델>/` (위 "학습과 평가") |
+| `runs/ml/<이름>/` | `metrics.csv`, `predictions.csv`, `run.json`, `models/`(저장한 모델), `edge_cases_<모델>/`, `predict_<입력>.csv` (위 "학습과 평가", "새 익형 예측") |
 
 ## 설정 파일 전체 구조 (`project.toml`)
 

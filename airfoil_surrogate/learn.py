@@ -7,7 +7,19 @@
   baseline : 얇은 익형 이론 CL = 2π(α − α0) (α0는 형상의 캠버선으로 계산), log10 CD = 학습 데이터 평균
   lgbm     : LightGBM. 목표별로 평균 모델 + 분위 회귀(5%, 95%) 모델 → 90% 예측 구간
   mlp      : PyTorch 다층 퍼셉트론. 시드만 다른 n_seeds개 앙상블, 평균 = 예측, 표준편차 × 1.645 → 90% 예측 구간
-             (n_seeds = 1이면 표준편차를 정할 수 없어 예측 구간을 내지 않는다)
+
+예측 구간 보정 (pi_calibration = "conformal", 기본)
+  앙상블 표준편차는 모델 불확실성만 담고 데이터 잡음(진동 케이스의 흔들림 등)은 담지 못하며, 분위 회귀
+  구간도 작은 데이터에서는 좁게 나온다. 그래서 검증(val) 케이스로 분할 컨포멀(split conformal) 보정을 한다.
+    mlp  : 정규화 점수 |y − 평균| / (표준편차 + β), β = val 표준편차의 중앙값 → 구간 = 평균 ± q·(표준편차 + β)
+           (시드 1개면 표준편차가 없으므로 |y − 평균| → 구간 = 평균 ± q, 폭 일정)
+    lgbm : CQR(Romano et al. 2019) 점수 max(lo − y, y − hi) → 구간 = [lo − q, hi + q]
+    q = 점수의 ⌈(n+1)·0.9⌉/n 분위수. 보정 전 구간은 *_lo_raw, *_hi_raw 열로 남긴다.
+  val은 조기 종료와 구간 보정에 쓰이므로 val 지표는 낙관적이다(metrics.csv held_out = 0). 최종 보고는 test, test_ood.
+  보정은 val과 같은 분포(같은 family의 처음 보는 형상)에서만 보장되며, holdout family(test_ood)에서는
+  포함률이 목표보다 낮을 수 있다(학습 범위 밖 외삽, 특히 트리 모델). train이 이를 경고한다.
+
+모델 저장 (runs/ml/<이름>/models/) → afs predict 로 새 익형·조건 예측 (predict.py)
 
 평가 (runs/ml/<이름>/metrics.csv)
   분할(val, test, test_ood)마다 조건별 표본 수와 MAE(cl), MAE(log10_cd), 90% 예측 구간 폭·실제 포함률.
@@ -45,6 +57,9 @@ N_BOOT = 2000                                         # 형상 단위 부트스�
 EVAL_SPLITS = ("val", "test", "test_ood")
 DIVERGED = "diverged"
 ML_DIR = "ml"
+MODELS_DIR = "models"
+PI_CALIBRATIONS = ("conformal", "none")
+OOD_COVER_WARN = 0.15   # test_ood 포함률이 목표보다 이만큼 넘게 낮으면 경고
 # predictions.csv에 함께 남기는 데이터셋 열 (경계 사례 분석용). yplus* 열도 함께 남긴다.
 CARRY_COLUMNS = ("conv_cl_std", "conv_cd_std", "conv_state_tsst", "cl_tsst", "log10_cd_tsst",
                  "d_cl_tsst", "d_log10_cd_tsst")
@@ -62,6 +77,7 @@ class TrainOptions:
     batch_size: int = 256
     stall_weight: float = 1.0         # 실속 부근 학습 케이스 가중치 (개선 실험)
     ood_train_fraction: float = 0.0   # test_ood 형상 중 이 비율을 학습에 추가 (개선 실험)
+    pi_calibration: str = "conformal"  # conformal: val로 예측 구간 보정 / none: 보정 없음 (모델 그대로)
     name: str | None = None
 
     def validate(self) -> None:
@@ -78,6 +94,8 @@ class TrainOptions:
             raise bad(f"lr은 0보다 커야 합니다: {self.lr!r}")
         if not (math.isfinite(self.stall_weight) and self.stall_weight > 0):
             raise bad(f"stall_weight는 0보다 커야 합니다: {self.stall_weight!r}")
+        if self.pi_calibration not in PI_CALIBRATIONS:
+            raise bad(f"pi_calibration은 {', '.join(PI_CALIBRATIONS)} 중 하나여야 합니다: {self.pi_calibration!r}")
         if not 0 <= self.ood_train_fraction <= 1:
             raise bad(f"ood_train_fraction은 0~1이어야 합니다: {self.ood_train_fraction!r}")
 
@@ -128,6 +146,15 @@ class Baseline:
         a = np.radians([r["aoa"] - r["alpha0_thin_deg"] for r in rows])
         return {"cl": 2 * np.pi * a, "log10_cd": np.full(len(rows), self.cd)}
 
+    def save(self, path) -> dict:
+        return {"cd": self.cd}
+
+    @classmethod
+    def load(cls, path, state: dict) -> "Baseline":
+        obj = cls()
+        obj.cd = float(state["cd"])
+        return obj
+
 
 class LGBMModel:
     name = "lgbm"
@@ -158,11 +185,33 @@ class LGBMModel:
         x = _matrix(rows, self.cols)
         out = {}
         for t in TARGETS:
-            pred = {k: self.models[(t, k)].predict(x, num_iteration=self.models[(t, k)].best_iteration)
+            pred = {k: self.models[(t, k)].predict(x, num_iteration=self.models[(t, k)].best_iteration or None)
                     for k in ("mean", "lo", "hi")}
             out[t] = pred["mean"]
             out[f"{t}_lo"], out[f"{t}_hi"] = np.minimum(pred["lo"], pred["hi"]), np.maximum(pred["lo"], pred["hi"])
         return out
+
+    def save(self, path) -> dict:
+        files = {}
+        for (t, kind), booster in self.models.items():
+            name = f"lgbm_{t}_{kind}.txt"
+            booster.save_model(str(path / name), num_iteration=booster.best_iteration or None)
+            files[f"{t}|{kind}"] = name
+        return {"cols": self.cols, "files": files}
+
+    @classmethod
+    def load(cls, path, state: dict) -> "LGBMModel":
+        try:
+            import lightgbm as lgb
+        except ImportError as exc:
+            raise ConfigError("lightgbm이 없습니다: pip install -e \".[ml]\"") from exc
+        obj = cls()
+        obj.cols = state["cols"]
+        obj.models = {}
+        for key, name in state["files"].items():
+            t, kind = key.split("|")
+            obj.models[(t, kind)] = lgb.Booster(model_file=str(path / name))
+        return obj
 
 
 class MLPEnsemble:
@@ -244,9 +293,109 @@ class MLPEnsemble:
         out = {}
         for k, t in enumerate(TARGETS):
             out[t] = mean[:, k]
-            if std is not None:  # 시드 1개로는 앙상블 분산을 정할 수 없음 → 구간 없음 (폭 0 구간을 내지 않음)
+            if std is not None:  # 시드 1개로는 앙상블 분산을 정할 수 없음 → 보정 전 구간 없음 (폭 0 구간을 내지 않음)
+                out[f"{t}_std"] = std[:, k]
                 out[f"{t}_lo"], out[f"{t}_hi"] = mean[:, k] - Z_PI * std[:, k], mean[:, k] + Z_PI * std[:, k]
         return out
+
+    def save(self, path) -> dict:
+        import torch
+
+        torch.save({"state_dicts": [net.state_dict() for net in self.nets]}, path / "mlp.pt")
+        return {"cols": self.cols, "hidden": list(self.opts.hidden), "file": "mlp.pt",
+                "xm": self.xm.tolist(), "xs": self.xs.tolist(), "ym": self.ym.tolist(), "ys": self.ys.tolist()}
+
+    @classmethod
+    def load(cls, path, state: dict) -> "MLPEnsemble":
+        try:
+            import torch
+        except ImportError as exc:
+            raise ConfigError("PyTorch가 없습니다: pip install -e \".[ml]\"") from exc
+        obj = cls(TrainOptions(hidden=list(state["hidden"])))
+        obj.cols = state["cols"]
+        obj.xm, obj.xs, obj.ym, obj.ys = (np.asarray(state[k], float) for k in ("xm", "xs", "ym", "ys"))
+        saved = torch.load(path / state["file"], map_location="cpu", weights_only=True)
+        obj.nets = []
+        for sd in saved["state_dicts"]:
+            net = obj._net(torch, len(obj.cols))
+            net.load_state_dict(sd)
+            net.eval()
+            obj.nets.append(net)
+        return obj
+
+
+MODEL_CLASSES = {"baseline": Baseline, "lgbm": LGBMModel, "mlp": MLPEnsemble}
+
+
+def load_models(run_dir, names: list[str] | None = None) -> tuple[dict, dict]:
+    """runs/ml/<실행>/models/ 에 저장한 모델을 읽는다. 반환: (model.json 내용, {이름: (모델, 보정 값)})."""
+    path = run_dir / MODELS_DIR / "model.json"
+    if not path.is_file():
+        raise ConfigError(f"저장된 모델이 없습니다: {path}  (afs train 으로 먼저 학습하세요)")
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"model.json을 읽을 수 없습니다: {path} ({exc})") from None
+    available = list(meta.get("models", {}))
+    names = names or available
+    missing = [n for n in names if n not in available]
+    if missing:
+        raise ConfigError(f"{run_dir.name}에 없는 모델: {', '.join(missing)} (있는 모델: {', '.join(available)})")
+    loaded = {}
+    for n in names:
+        entry = meta["models"][n]
+        loaded[n] = (MODEL_CLASSES[n].load(run_dir / MODELS_DIR, entry["state"]), entry.get("calibration"))
+    return meta, loaded
+
+
+# ---------------------------------------------------------------- 예측 구간 보정
+
+def conformal_quantile(scores: np.ndarray) -> float:
+    """분할 컨포멀 분위수: 점수의 ⌈(n+1)·PI_LEVEL⌉/n 분위수 (n이 작으면 최댓값)."""
+    n = len(scores)
+    level = min(1.0, math.ceil((n + 1) * PI_LEVEL) / n)
+    return float(np.quantile(scores, level, method="higher"))
+
+
+def fit_calibration(preds: dict[str, np.ndarray], rows: list[dict]) -> dict:
+    """val 예측(preds)과 정답(rows)으로 목표별 보정 값을 구한다. 형식은 모듈 설명 참고."""
+    if not rows:
+        raise ConfigError("예측 구간 보정에 쓸 검증 케이스가 없습니다.")
+    cal = {}
+    for t in TARGETS:
+        y, p = np.array([r[t] for r in rows], float), preds[t]
+        if f"{t}_std" in preds:
+            beta = max(float(np.median(preds[f"{t}_std"])), 1e-12)
+            scores = np.abs(y - p) / (preds[f"{t}_std"] + beta)
+            cal[t] = {"method": "scaled", "beta": beta}
+        elif f"{t}_lo" in preds:
+            scores = np.maximum(preds[f"{t}_lo"] - y, y - preds[f"{t}_hi"])
+            cal[t] = {"method": "cqr"}
+        else:
+            scores = np.abs(y - p)
+            cal[t] = {"method": "absolute"}
+        cal[t].update(q=conformal_quantile(scores), n=len(rows))
+    return cal
+
+
+def apply_calibration(preds: dict[str, np.ndarray], cal: dict | None) -> dict[str, np.ndarray]:
+    """보정된 구간을 {t}_lo, {t}_hi로, 보정 전 구간은 {t}_lo_raw, {t}_hi_raw로."""
+    if not cal:
+        return preds
+    out = dict(preds)
+    for t, c in cal.items():
+        p, q = preds[t], c["q"]
+        if f"{t}_lo" in preds:
+            out[f"{t}_lo_raw"], out[f"{t}_hi_raw"] = preds[f"{t}_lo"], preds[f"{t}_hi"]
+        if c["method"] == "scaled":
+            half = q * (preds[f"{t}_std"] + c["beta"])
+            lo, hi = p - half, p + half
+        elif c["method"] == "cqr":
+            lo, hi = preds[f"{t}_lo"] - q, preds[f"{t}_hi"] + q
+        else:
+            lo, hi = p - q, p + q
+        out[f"{t}_lo"], out[f"{t}_hi"] = np.minimum(lo, hi), np.maximum(lo, hi)
+    return out
 
 
 # ---------------------------------------------------------------- 평가
@@ -303,7 +452,8 @@ def evaluate(rows: list[dict], preds: dict[str, np.ndarray], model: str, train_s
     metrics = []
     for (split, cond), idx in sorted(groups.items()):
         boot = ShapeBootstrap([rows[i]["shape"] for i in idx], f"{split}|{cond}", seed)
-        entry = {"model": model, "split": split, "condition": cond, "n": len(idx), "n_shapes": boot.n_shapes}
+        entry = {"model": model, "split": split, "held_out": int(split != "val"), "condition": cond,
+                 "n": len(idx), "n_shapes": boot.n_shapes}
         for t in TARGETS:
             y = np.array([rows[i][t] for i in idx])
             p = preds[t][idx]
@@ -322,7 +472,7 @@ def count_only(rows: list[dict], model: str) -> list[dict]:
     for split in EVAL_SPLITS:
         sub = [r for r in rows if r["eval_split"] == split]
         if sub:
-            out.append({"model": model, "split": split, "condition": f"state={DIVERGED}",
+            out.append({"model": model, "split": split, "held_out": int(split != "val"), "condition": f"state={DIVERGED}",
                         "n": len(sub), "n_shapes": len({r["shape"] for r in sub})})
     return out
 
@@ -381,20 +531,49 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     usable = set(ml.train_states)
 
-    makers = {"baseline": Baseline, "lgbm": LGBMModel, "mlp": lambda: MLPEnsemble(opts)}
+    makers = {**MODEL_CLASSES, "mlp": lambda: MLPEnsemble(opts)}
     unknown = set(opts.models) - set(makers)
     if unknown:
         raise ConfigError(f"알 수 없는 모델: {', '.join(sorted(unknown))} ({', '.join(MODEL_NAMES)})")
-    metrics, predictions, extra = [], {}, {}
+    models_dir = out_dir / MODELS_DIR
+    if models_dir.is_dir():
+        for old in models_dir.iterdir():  # 이전 실행의 모델 파일 (다른 모델 조합이었을 수 있음)
+            if old.is_file():
+                old.unlink()
+    models_dir.mkdir(parents=True, exist_ok=True)
+    metrics, predictions, extra, saved, calibrations = [], {}, {}, {}, {}
     for m in opts.models:
         model = makers[m]()
         model.fit(train_rows, val_rows, cols, weights)
-        preds = model.predict(eval_rows)
+        cal = None
+        if opts.pi_calibration == "conformal" and m != "baseline":  # 이론식(baseline)은 구간을 내지 않음
+            cal = fit_calibration(model.predict(val_rows), val_rows)
+            calibrations[m] = cal
+        preds = apply_calibration(model.predict(eval_rows), cal)
         predictions[m] = preds
         entries = evaluate(eval_rows, preds, m, usable, ml.seed) + count_only(parts["diverged"], m)
         metrics += sorted(entries, key=lambda e: (EVAL_SPLITS.index(e["split"]), e["condition"]))
+        saved[m] = {"state": model.save(models_dir), "calibration": cal}
         if m == "mlp":
             extra["mlp_members"] = model.history
+        ood = next((e for e in entries if e["split"] == "test_ood" and e["condition"] == "all"
+                    and f"cover{PI_TAG}_cl" in e), None)
+        if ood is not None:
+            low = [t for t in TARGETS if ood[f"cover{PI_TAG}_{t}"] < PI_LEVEL - OOD_COVER_WARN]
+            if low:
+                warnings.append(
+                    f"{m}: 처음 보는 형상(test_ood)에서 {PI_TAG}% 예측 구간 포함률이 낮습니다 ("
+                    + ", ".join(f"{t} {ood[f'cover{PI_TAG}_{t}']:.0%}" for t in low)
+                    + "). 학습 형상 범위 밖으로 외삽하고 있어 구간을 믿을 수 없습니다"
+                    + (" (트리 모델은 학습 범위 밖에서 값이 평평해짐)." if m == "lgbm" else "."))
+    write_json_atomic(models_dir / "model.json", {
+        "features": cols, "feature_set": opts.features, "targets": list(TARGETS), "pi_level": PI_LEVEL,
+        "pi_calibration": opts.pi_calibration, "models": saved,
+        # predict가 학습 범위 밖 입력(외삽)을 표시하는 데 쓴다
+        "train_ranges": {c: [float(min(r[c] for r in train_rows)), float(max(r[c] for r in train_rows))]
+                         for c in cols},
+        "train_shapes": sorted({r["shape"] for r in train_rows}),
+    })
 
     from .dataset import _write_csv
     _write_csv(out_dir / "metrics.csv", metrics)
@@ -414,7 +593,7 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
         "n_train": len(train_rows), "n_val": len(val_rows),
         "n_train_shapes": len({r["shape"] for r in train_rows}),
         "pi_level": PI_LEVEL, "n_boot": N_BOOT, "n_diverged_excluded": len(parts["diverged"]),
-        "ood_shapes_moved_to_train": parts["moved"], **extra,
+        "ood_shapes_moved_to_train": parts["moved"], "pi_calibration": calibrations, **extra,
     })
     diverged = {s: sum(1 for r in parts["diverged"] if r["eval_split"] == s) for s in EVAL_SPLITS}
     return {"dir": out_dir, "metrics": metrics, "n_train": len(train_rows), "n_val": len(val_rows),
