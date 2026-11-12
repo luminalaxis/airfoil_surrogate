@@ -32,6 +32,7 @@ import numpy as np
 
 from .cases import Case
 from .config import ConfigError, ProjectConfig
+from .fileutil import write_json_atomic
 from .cst import CSTFit, fit_cst, section_stats
 from .geometry import load_section
 from .results import summarize_case
@@ -61,8 +62,17 @@ class MLConfig:
         if unknown:
             raise ConfigError(f"[ml]에 알 수 없는 항목: {', '.join(sorted(unknown))}")
         obj = cls(**data)
-        if len(obj.split) != 3 or abs(sum(obj.split) - 1) > 1e-6 or min(obj.split) < 0:
+        if (not isinstance(obj.split, list) or len(obj.split) != 3
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in obj.split)
+                or abs(sum(obj.split) - 1) > 1e-6 or min(obj.split) < 0):
             raise ConfigError(f"[ml] split은 합이 1인 비율 3개여야 합니다: {obj.split}")
+        if not obj.cst_orders or not all(isinstance(n, int) and n >= 2 for n in obj.cst_orders):
+            raise ConfigError(f"[ml] cst_orders는 2 이상인 정수 목록이어야 합니다: {obj.cst_orders}")
+        for name in ("holdout_families", "train_states"):
+            if not isinstance(getattr(obj, name), list):
+                raise ConfigError(f"[ml] {name}은 목록이어야 합니다: {getattr(obj, name)!r}")
+        if not isinstance(obj.seed, int) or isinstance(obj.seed, bool):
+            raise ConfigError(f"[ml] seed는 정수여야 합니다: {obj.seed!r}")
         return obj
 
 
@@ -123,7 +133,14 @@ def assign_splits(shapes: dict[str, str], ml: MLConfig, previous: dict[str, str]
 def _load_split(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8")).get("assignments", {})
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"split.json을 읽을 수 없습니다 ({exc}). 파일을 고치거나 --resplit 으로 다시 나누세요: {path}") from None
+    assignments = data.get("assignments", {}) if isinstance(data, dict) else None
+    if not isinstance(assignments, dict):
+        raise ConfigError(f"split.json 형식이 잘못되었습니다. --resplit 으로 다시 나누세요: {path}")
+    return assignments
 
 
 # ---------------------------------------------------------------- 데이터셋
@@ -211,10 +228,10 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
     previous = {} if resplit else _load_split(split_path)
     splits = assign_splits({k: v["family"] for k, v in shapes.items()}, ml, previous)
     moved = [k for k, v in previous.items() if k in splits and splits[k] != v]
-    split_path.write_text(json.dumps({
+    write_json_atomic(split_path, {
         "seed": ml.seed, "ratios": ml.split, "holdout_families": ml.holdout_families,
         "assignments": dict(sorted(splits.items())),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
 
     warnings, fits = [], {}
     for sid, info in shapes.items():

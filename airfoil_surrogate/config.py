@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 DEFAULT_ERROR_PATTERNS = [
@@ -77,12 +77,47 @@ class ProjectConfig:
         return self.path.parent
 
 
+def _section(cls, data, where: str):
+    """[solver]/[results] 표를 데이터클래스로. 알 수 없는 항목(오타)은 traceback 대신 ConfigError."""
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}는 표(table)여야 합니다.")
+    known = {f.name for f in fields(cls)}
+    unknown = set(data) - known
+    if unknown:
+        import difflib
+
+        hints = [f"{k} (→ {m[0]}?)" if (m := difflib.get_close_matches(k, known, 1)) else k for k in sorted(unknown)]
+        raise ConfigError(f"{where}에 알 수 없는 항목: {', '.join(hints)}")
+    return cls(**data)
+
+
+def _check_number(value, where: str, integer: bool = False, minimum: float | None = None,
+                  allow_none: bool = False):
+    if value is None and allow_none:
+        return
+    ok = isinstance(value, int) if integer else isinstance(value, (int, float))
+    if isinstance(value, bool) or not ok:
+        raise ConfigError(f"{where}는 {'정수' if integer else '숫자'}여야 합니다: {value!r}")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"{where}는 {minimum} 이상이어야 합니다: {value!r}")
+
+
+def _check_str_list(value, where: str) -> None:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{where}는 문자열 목록이어야 합니다: {value!r}")
+
+
 def load_config(path: str | Path) -> ProjectConfig:
     path = Path(path).resolve()
     if not path.is_file():
         raise ConfigError(f"설정 파일을 찾을 수 없습니다: {path}")
-    with path.open("rb") as f:
-        data = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"설정 파일 문법 오류 ({path.name}): {exc}") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"설정 파일을 UTF-8로 읽을 수 없습니다 ({path.name}): {exc}") from None
 
     root = path.parent
     project = data.get("project", {})
@@ -91,13 +126,28 @@ def load_config(path: str | Path) -> ProjectConfig:
     if "template" not in project:
         raise ConfigError("[project] template (저널 템플릿 경로)을 지정해야 합니다.")
 
-    solver = SolverConfig(**data.get("solver", {}))
+    solver = _section(SolverConfig, data.get("solver", {}), "[solver]")
+    _check_number(solver.processes, "[solver] processes", integer=True, minimum=1)
+    _check_number(solver.timeout_minutes, "[solver] timeout_minutes", minimum=0, allow_none=True)
+    _check_str_list(solver.extra_args, "[solver] extra_args")
+    if solver.command is not None:
+        _check_str_list(solver.command, "[solver] command")
     if solver.kind not in ("fluent", "custom"):
         raise ConfigError(f"[solver] kind는 'fluent' 또는 'custom'이어야 합니다: {solver.kind!r}")
     if solver.kind == "custom" and not solver.command:
         raise ConfigError("[solver] kind='custom'이면 command를 지정해야 합니다.")
 
-    results = ResultsConfig(**data.get("results", {}))
+    results = _section(ResultsConfig, data.get("results", {}), "[results]")
+    _check_number(results.average_last, "[results] average_last", integer=True, minimum=1)
+    _check_number(results.average_last_oscillating, "[results] average_last_oscillating", integer=True,
+                  minimum=1, allow_none=True)
+    _check_str_list(results.report_files, "[results] report_files")
+    _check_str_list(results.error_patterns, "[results] error_patterns")
+    _check_str_list(results.split_by, "[results] split_by")
+    if results.objective not in ("max_ld", "max_cl"):
+        raise ConfigError(f"[results] objective는 'max_ld' 또는 'max_cl'이어야 합니다: {results.objective!r}")
+    max_parallel = project.get("max_parallel", 1)
+    _check_number(max_parallel, "[project] max_parallel", integer=True, minimum=1)
 
     cases_csv = cases.get("csv")
     sweep = cases.get("sweep", {})
@@ -127,7 +177,7 @@ def load_config(path: str | Path) -> ProjectConfig:
         case_sets=case_sets,
         constants=data.get("constants", {}),
         derived=data.get("derived", {}),
-        max_parallel=int(project.get("max_parallel", 1)),
+        max_parallel=max_parallel,
         mesh=data.get("mesh"),
         solver=solver,
         results=results,

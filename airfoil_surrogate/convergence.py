@@ -5,6 +5,8 @@
                  리포트 값이 NaN/inf, 또는 |계수|가 max_abs_coef를 넘음
   2. converged : 마지막 window 반복에서 CL·CD 진폭(최대 − 최소)이 허용치 이하이거나,
                  Fluent가 잔차 기준을 만족해 스스로 멈춤("solution is converged")
+  incomplete : 발산은 아니지만 정답으로 믿을 수 없는 경우. 실행이 정상 종료되지 않았거나(시간 초과, 종료 코드,
+               로그 오류, 중단, 실행 중) 반복 수가 min_iters보다 적음. 학습에는 쓰지 않는다(train_states에 없음).
   3. oscillating: 그 밖의 경우. 값이 주기적으로 흔들리는 경우와 아직 한쪽으로 계속 변하는 경우(drift)를
                  모두 포함한다. conv_reason에 "amplitude"/"drift"로 구분해 남긴다.
   결과 파일이 없으면 no_data.
@@ -24,6 +26,9 @@ import numpy as np
 from .config import ConfigError
 
 CONVERGED, OSCILLATING, DIVERGED, NO_DATA = "converged", "oscillating", "diverged", "no_data"
+INCOMPLETE = "incomplete"
+# 이 실행 상태(status.json)의 결과는 반복 도중에 끊긴 값일 수 있어 정답으로 쓰지 않는다
+INCOMPLETE_RUN_STATES = ("failed", "interrupted", "running", "unknown")
 DIVERGENCE_PATTERNS = ("diverg", "floating point exception")
 RESIDUALS = ("continuity", "x-velocity", "y-velocity", "energy", "k", "omega", "epsilon", "nut",
              "intermit", "retheta")
@@ -38,6 +43,7 @@ class ConvergenceConfig:
     cd_tol: float = 1e-4        # CD 진폭 허용치 (절대)
     cd_rel_tol: float = 0.02    # CD 진폭 허용치 (평균 CD 대비)
     max_abs_coef: float = 10.0  # 계수 크기가 이보다 크면 발산
+    min_iters: int = 50         # 반복 수가 이보다 적으면 incomplete (초기 과도 구간만 있는 결과)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "ConvergenceConfig":
@@ -45,7 +51,12 @@ class ConvergenceConfig:
         unknown = set(data) - {f.name for f in fields(cls)}
         if unknown:
             raise ConfigError(f"[convergence]에 알 수 없는 항목: {', '.join(sorted(unknown))}")
-        return cls(**data)
+        obj = cls(**data)
+        for f in fields(cls):
+            v = getattr(obj, f.name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ConfigError(f"[convergence] {f.name}는 0 이상의 숫자여야 합니다: {v!r}")
+        return obj
 
 
 def coefficient_history(headers: list[str], rows: list[list[float]],
@@ -137,6 +148,14 @@ def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConf
         return {**out, "conv_state": DIVERGED, "conv_reason": "non-finite coefficient"}
     if max(np.max(np.abs(cl_w)), np.max(np.abs(cd_w))) > cfg.max_abs_coef or np.mean(cd_w) <= 0:
         return {**out, "conv_state": DIVERGED, "conv_reason": "coefficient out of range"}
+
+    run_state = status.get("state")
+    if run_state in INCOMPLETE_RUN_STATES:
+        reason = str(status.get("message", "")).strip()
+        return {**out, "conv_state": INCOMPLETE,
+                "conv_reason": f"run {run_state}" + (f": {reason[:70]}" if reason else "")}
+    if len(cl) < cfg.min_iters:
+        return {**out, "conv_state": INCOMPLETE, "conv_reason": f"too few iterations ({len(cl)} < {cfg.min_iters})"}
 
     cl_lim = max(cfg.cl_tol, cfg.cl_rel_tol * abs(float(np.mean(cl_w))))
     cd_lim = max(cfg.cd_tol, cfg.cd_rel_tol * abs(float(np.mean(cd_w))))

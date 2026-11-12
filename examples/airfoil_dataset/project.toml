@@ -60,7 +60,7 @@ growth_rate = 1.15
 surface_cells = 200
 wake_angles = [-4, 4, 10, 16]  # 받음각 범위를 덮는 후류 세분화 방향 [deg]
 
-[convergence]                # 수렴 상태 판정 (summary.csv의 conv_state: converged / oscillating / diverged)
+[convergence]                # 수렴 상태 판정 (summary.csv의 conv_state: converged / oscillating / diverged / incomplete)
 window = 200                 # 마지막 200 반복으로 판정 (average_last와 같게)
 cl_tol = 0.005               # CL 진폭 허용: max(0.005, 1% × |CL|)
 cl_rel_tol = 0.01

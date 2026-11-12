@@ -17,7 +17,7 @@ _BIN_OPS = {
     ast.Div: operator.truediv,
     ast.FloorDiv: operator.floordiv,
     ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
+    ast.Pow: lambda a, b: _pow(a, b),
 }
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
@@ -36,12 +36,30 @@ class ExpressionError(ValueError):
     pass
 
 
+MAX_INT_EXPONENT = 64  # 정수 거듭제곱은 이 지수까지만 정수로 계산 (2**10**10 같은 수식이 멈추지 않도록)
+
+
 def evaluate(expression: str, variables: dict) -> float:
+    if not isinstance(expression, str):
+        raise ExpressionError(f"수식은 문자열이어야 합니다: {expression!r}")
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
         raise ExpressionError(f"수식 문법 오류: {expression!r}") from exc
-    return _eval(tree.body, variables, expression)
+    try:
+        return _eval(tree.body, variables, expression)
+    except ExpressionError:
+        raise
+    except (ArithmeticError, ValueError, TypeError) as exc:
+        # 0으로 나누기, sqrt(음수), 넘침, 문자열 변수에 산술 등
+        shown = {k: v for k, v in variables.items() if k in expression}
+        raise ExpressionError(f"수식 계산 오류: {expression!r} ({type(exc).__name__}: {exc}; 변수 {shown})") from None
+
+
+def _pow(a, b):
+    if isinstance(a, int) and isinstance(b, int) and abs(b) > MAX_INT_EXPONENT:
+        return float(a) ** b  # 너무 크면 OverflowError
+    return operator.pow(a, b)
 
 
 def _eval(node, variables, src):

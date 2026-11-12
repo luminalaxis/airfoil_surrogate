@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ConfigError, safe_name
+from .fileutil import write_json_atomic
 from .fluent_msh import Boundary, check_msh, write_msh
 from .geometry import Geometry, build_geometry, geometry_params
 
@@ -63,6 +64,13 @@ class MeshSettings:
         if unknown:
             raise ConfigError(f"[mesh]에 알 수 없는 항목: {', '.join(sorted(unknown))}")
         obj = cls(**data)
+        try:
+            return obj._validated()
+        except TypeError as exc:  # 숫자 자리에 문자열 등
+            raise ConfigError(f"[mesh] 값의 형식이 잘못되었습니다: {exc}") from None
+
+    def _validated(self) -> "MeshSettings":
+        obj = self
         if obj.wake_angles is None:
             obj.wake_angles = [-10.0, 0.0, 10.0, 20.0]
         if obj.farfield_shape not in ("circle", "box"):
@@ -71,6 +79,14 @@ class MeshSettings:
             raise ConfigError("[mesh] box_upstream, box_height는 0보다, box_downstream은 1(시위)보다 커야 합니다.")
         if not obj.refine > 0:
             raise ConfigError(f"[mesh] refine은 0보다 커야 합니다: {obj.refine}")
+        # growth_rate = 1이면 경계층 층수 계산이 0으로 나누기가 되고, 1 미만이면 바깥으로 갈수록 셀이 작아진다
+        if not obj.growth_rate > 1:
+            raise ConfigError(f"[mesh] growth_rate는 1보다 커야 합니다: {obj.growth_rate}")
+        for name in ("reynolds", "y_plus", "chord", "bl_thickness", "near_size", "wake_size"):
+            if not getattr(obj, name) > 0:
+                raise ConfigError(f"[mesh] {name}은 0보다 커야 합니다: {getattr(obj, name)}")
+        if int(obj.surface_cells) < 4:
+            raise ConfigError(f"[mesh] surface_cells는 4 이상이어야 합니다: {obj.surface_cells}")
         return obj
 
     def first_cell_height(self) -> float:
@@ -496,7 +512,7 @@ def _generate(job: MeshJob, root: Path, plots: bool) -> dict:
         "attempts": attempt,
         **stats,
     }
-    (job.dir / INFO_FILE).write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(job.dir / INFO_FILE, info)
 
     if plots:
         from .plots import plot_geometry, plot_mesh

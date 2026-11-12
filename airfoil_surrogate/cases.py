@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import itertools
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,9 +28,11 @@ def _coerce(value: str):
         return value  # "0012" 같은 NACA 코드는 문자열 그대로
     for conv in (int, float):
         try:
-            return conv(value)
+            number = conv(value)
         except ValueError:
-            pass
+            continue
+        # "nan", "inf", "infinity" 같은 이름(익형 이름 등)은 숫자로 바꾸지 않는다
+        return number if math.isfinite(number) else value
     return value
 
 
@@ -37,11 +40,15 @@ def _read_csv(path: Path) -> list[dict]:
     if not path.is_file():
         raise ConfigError(f"케이스 CSV를 찾을 수 없습니다: {path}")
     # utf-8-sig: 엑셀에서 저장한 CSV의 BOM 처리
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        rows = [
-            {k.strip(): _coerce(v) for k, v in row.items() if k and v is not None and v.strip()}
-            for row in csv.DictReader(f)
-        ]
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            rows = [
+                {k.strip(): _coerce(v) for k, v in row.items()
+                 if k and isinstance(v, str) and v.strip()}  # 열보다 값이 많은 행의 남는 값(list)은 무시
+                for row in csv.DictReader(f)
+            ]
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"케이스 CSV를 UTF-8로 읽을 수 없습니다 (엑셀에서 'CSV UTF-8'로 저장): {path} ({exc})") from None
     return [r for r in rows if r]
 
 

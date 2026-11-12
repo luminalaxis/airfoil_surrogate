@@ -162,6 +162,15 @@ def geometry_keys(cfg: ProjectConfig, cases: list[Case]) -> list[str]:
     return keys
 
 
+def _sort_value(v) -> tuple:
+    """숫자·문자열·None이 섞여 있어도 정렬되도록 (숫자 → 문자열 → 없음 순)."""
+    if isinstance(v, bool) or v is None:
+        return (2, "") if v is None else (1, str(v))
+    if isinstance(v, (int, float)):
+        return (0, v)
+    return (1, str(v))
+
+
 def rank_geometries(rows: list[dict], keys: list[str], x_param: str, objective: str,
                     split_by: list[str] = ()) -> list[dict]:
     """형상별 최대 Cl/L/D. split_by가 있으면 그 조건(예: 속도)마다 따로 순위를 매긴다."""
@@ -183,7 +192,7 @@ def rank_geometries(rows: list[dict], keys: list[str], x_param: str, objective: 
             entry["geometry"] = rs[0]["geometry"]
         ranking.append(entry)
     sort_key = "ld_max" if objective == "max_ld" else "cl_max"
-    ranking.sort(key=lambda e: (tuple(e.get(k) for k in split_by), -e.get(sort_key, float("-inf"))))
+    ranking.sort(key=lambda e: (tuple(_sort_value(e.get(k)) for k in split_by), -e.get(sort_key, float("-inf"))))
     counter: dict[tuple, int] = {}
     for e in ranking:
         cond = tuple(e.get(k) for k in split_by)
@@ -220,7 +229,8 @@ def collect(cfg: ProjectConfig, cases: list[Case], plots: bool = True) -> dict:
         cl_label = "Cl"
         if split_by:
             # 조건(속도 등)별 폴더에 그래프를 따로 저장
-            conds = sorted({tuple(r.get(k) for k in split_by) for r in rows})
+            conds = sorted({tuple(r.get(k) for k in split_by) for r in rows},
+                           key=lambda cond: tuple(_sort_value(v) for v in cond))
             for cond in conds:
                 sub = [r for r in rows if tuple(r.get(k) for k in split_by) == cond]
                 label = safe_name(", ".join(f"{k}={v}" for k, v in zip(split_by, cond)))

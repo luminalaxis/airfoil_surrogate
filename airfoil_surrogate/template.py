@@ -22,7 +22,12 @@ def render(text: str, variables: dict, source: str = "템플릿") -> str:
             missing.add(key)
             return match.group(0)
         value = variables[key]
-        return format(value, spec) if spec else str(value)
+        if not spec:
+            return str(value)
+        try:
+            return format(value, spec)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(f"{source}의 ${{{key}:{spec}}}: 값 {value!r}에 쓸 수 없는 형식입니다 ({exc})") from None
 
     result = _PLACEHOLDER.sub(replace, text)
     if missing:

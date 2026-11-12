@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .cases import Case
 from .config import ConfigError, ProjectConfig
+from .fileutil import FileLock, LockedError, write_json_atomic, write_text_atomic
 from .template import render
 
 IS_WINDOWS = os.name == "nt"
@@ -30,6 +31,9 @@ STALE_OUTPUTS = ("*.png", TRANSCRIPT_NAME, "*.cas.h5", "*.dat.h5", "*.cas.gz", "
 MESH_WORKERS_DEFAULT_MAX = 8  # mesh -j 를 주지 않았을 때 동시에 만들 메쉬 수의 상한 (메모리 고려)
 STATUS_NAME = "status.json"
 PARAMS_NAME = "case.json"
+# 같은 케이스·메쉬를 두 프로세스(afs run 두 번 등)가 동시에 다루지 못하게 하는 잠금 파일
+LOCK_NAME = ".afs.lock"
+POLL_SEC = 0.5  # 솔버 종료·중단 요청·시간 초과 확인 간격
 
 _print_lock = threading.Lock()
 
@@ -67,7 +71,7 @@ def ensure_meshes(cfg: ProjectConfig, cases: list[Case], force: bool = False,
     메모리 약 300 MB). 형상마다 시간 제한([mesh] timeout)이
     적용되고, 실패하거나 시간을 넘긴 형상만 실패 처리한 뒤 나머지를 계속 만든다.
     """
-    from .meshing import MeshWorker, generate_mesh, single_thread_blas
+    from .meshing import INFO_FILE, MeshWorker, generate_mesh, single_thread_blas
 
     jobs = {c.mesh.name: c.mesh for c in cases if c.mesh is not None}
     todo = [j for j in jobs.values() if force or not j.is_current()]
@@ -94,8 +98,14 @@ def ensure_meshes(cfg: ProjectConfig, cases: list[Case], force: bool = False,
                 mesh_workers.append(worker)
         start = time.monotonic()
         try:
-            info = generate_mesh(job, cfg.root, worker=worker, stop=stop)
+            with FileLock(job.dir / LOCK_NAME):
+                if not force and job.is_current():  # 기다리는 사이 다른 프로세스가 이미 만듦
+                    info = json.loads((job.dir / INFO_FILE).read_text(encoding="utf-8"))
+                else:
+                    info = generate_mesh(job, cfg.root, worker=worker, stop=stop)
             return job, info, None, time.monotonic() - start
+        except LockedError as exc:
+            return job, None, f"메쉬를 만들 수 없음 ({job.name}): {exc}", time.monotonic() - start
         except ConfigError as exc:
             return job, None, str(exc), time.monotonic() - start
 
@@ -111,9 +121,9 @@ def ensure_meshes(cfg: ProjectConfig, cases: list[Case], force: bool = False,
                     log(f"  [{i}/{len(todo)}] {job.name:<45} 실패 - {err}")
                 else:
                     oq = info.get("min_orthogonal_quality")
-                    log(f"  [{i}/{len(todo)}] {job.name:<45} {info['cells']:>8,} cells  "
-                        f"품질 {info['min_quality']:.2f}" + (f"  직교 {oq:.2f}" if oq is not None else "")
-                        + f"  {dt:4.1f}s")
+                    log(f"  [{i}/{len(todo)}] {job.name:<45} {info.get('cells', 0):>8,} cells  "
+                        f"품질 {info.get('min_quality', float('nan')):.2f}"
+                        + (f"  직교 {oq:.2f}" if oq is not None else "") + f"  {dt:4.1f}s")
     except BaseException:
         # Ctrl+C 등: 남은 형상은 취소하고, 만드는 중인 작업 프로세스는 바로 끝낸다
         stop.set()
@@ -181,12 +191,8 @@ def prepare_case(cfg: ProjectConfig, case: Case, template_text: str | None = Non
     case.dir.mkdir(parents=True, exist_ok=True)
     journal = render(template_text, case_variables(cfg, case), str(cfg.template.name))
     journal_path = case.dir / JOURNAL_NAME
-    journal_path.write_text(journal, encoding="utf-8")
-    (case.dir / PARAMS_NAME).write_text(
-        json.dumps({"name": case.name, "group": case.group, "params": case.params},
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_text_atomic(journal_path, journal)
+    write_json_atomic(case.dir / PARAMS_NAME, {"name": case.name, "group": case.group, "params": case.params})
     return journal_path
 
 
@@ -195,15 +201,14 @@ def read_status(case: Case) -> dict:
     if not path.is_file():
         return {"state": "pending"}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {"state": "unknown"}
+    return data if isinstance(data, dict) and "state" in data else {"state": "unknown"}
 
 
 def _write_status(case: Case, **status) -> None:
-    (case.dir / STATUS_NAME).write_text(
-        json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json_atomic(case.dir / STATUS_NAME, status)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -258,23 +263,40 @@ class RunResult:
 
 
 def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
-             force: bool = False) -> RunResult:
+             force: bool = False, stop: threading.Event | None = None) -> RunResult:
+    """케이스 하나 실행. stop(threading.Event)이 켜지면 솔버 프로세스 트리를 끝내고 interrupted로 돌아온다."""
     if not force and read_status(case).get("state") == "done":
         return RunResult(case, "skipped", "이미 완료됨")
+    if stop is not None and stop.is_set():
+        return RunResult(case, "interrupted", "중단됨 (시작 전)")
+    case.dir.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(case.dir / LOCK_NAME)
+    try:
+        lock.acquire()
+    except LockedError as exc:
+        return RunResult(case, "skipped", str(exc))
+    try:
+        # 잠금을 기다리는 사이 다른 프로세스가 끝냈을 수 있다
+        if not force and read_status(case).get("state") == "done":
+            return RunResult(case, "skipped", "이미 완료됨")
+        return _run_locked(cfg, case, template_text, stop)
+    finally:
+        lock.release()
 
+
+def _run_locked(cfg: ProjectConfig, case: Case, template_text: str | None,
+                stop: threading.Event | None) -> RunResult:
     if case.mesh is not None and not case.mesh.mesh_file.is_file():
         from .meshing import ERROR_FILE
 
         error_file = case.mesh.dir / ERROR_FILE
         reason = error_file.read_text(encoding="utf-8") if error_file.is_file() else "메쉬 파일 없음"
         msg = f"메쉬 실패 ({case.mesh.name}): {reason}"
-        case.dir.mkdir(parents=True, exist_ok=True)
         _write_status(case, state="failed", message=msg)
         return RunResult(case, "failed", msg)
 
     # 이전 실행 결과 정리 (리포트, 이미지, transcript, result.cas.h5 등). Fluent가 기존 파일 덮어쓰기 확인을
     # 물으면 그다음 저널 줄이 답으로 읽혀 배치가 꼬이거나 멈춘다.
-    case.dir.mkdir(parents=True, exist_ok=True)
     if msg := _remove_stale_outputs(cfg, case):
         _write_status(case, state="failed", message=msg)
         return RunResult(case, "failed", msg)
@@ -285,6 +307,7 @@ def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
 
     _write_status(case, state="running", command=cmd, started=time.strftime("%Y-%m-%d %H:%M:%S"))
     start = time.monotonic()
+    deadline = None if timeout is None else start + timeout
     with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         popen_kwargs = {"start_new_session": True} if not IS_WINDOWS else {}
         try:
@@ -294,17 +317,30 @@ def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
             _write_status(case, state="failed", command=cmd, message=f"실행 실패: {exc}")
             return RunResult(case, "failed", f"실행 실패: {exc}")
         try:
-            returncode = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
-            proc.wait()
-            elapsed = time.monotonic() - start
-            msg = f"시간 초과 ({cfg.solver.timeout_minutes}분)"
-            _write_status(case, state="failed", command=cmd, message=msg, elapsed_sec=round(elapsed, 1))
-            return RunResult(case, "failed", msg, elapsed)
+            # 짧게 나눠 기다리며 중단 요청(병렬 실행 중 Ctrl+C)과 시간 초과를 확인한다
+            while True:
+                try:
+                    returncode = proc.wait(timeout=POLL_SEC)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop is not None and stop.is_set():
+                    _kill_tree(proc)
+                    proc.wait()
+                    elapsed = time.monotonic() - start
+                    _write_status(case, state="interrupted", command=cmd, message="중단됨",
+                                  elapsed_sec=round(elapsed, 1))
+                    return RunResult(case, "interrupted", "중단됨", elapsed)
+                if deadline is not None and time.monotonic() >= deadline:
+                    _kill_tree(proc)
+                    proc.wait()
+                    elapsed = time.monotonic() - start
+                    msg = f"시간 초과 ({cfg.solver.timeout_minutes}분)"
+                    _write_status(case, state="failed", command=cmd, message=msg, elapsed_sec=round(elapsed, 1))
+                    return RunResult(case, "failed", msg, elapsed)
         except KeyboardInterrupt:
             _kill_tree(proc)
-            _write_status(case, state="interrupted", command=cmd)
+            _write_status(case, state="interrupted", command=cmd, message="중단됨")
             raise
 
     elapsed = time.monotonic() - start
@@ -339,10 +375,20 @@ def run_all(cfg: ProjectConfig, cases: list[Case], force: bool = False,
             results.append(r)
         return results
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(run_case, cfg, c, template_text, force): c for c in cases}
+    # Ctrl+C: 메인 스레드에서 KeyboardInterrupt가 나면 stop을 켜서 실행 중인 솔버를 끝내고(POLL_SEC 안),
+    # 아직 시작하지 않은 케이스는 취소한다. 솔버는 새 세션에서 돌아 터미널의 SIGINT를 직접 받지 않는다.
+    stop = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [pool.submit(run_case, cfg, c, template_text, force, stop) for c in cases]
         for i, fut in enumerate(as_completed(futures), start=1):
             r = fut.result()
             report(i, r)
             results.append(r)
+    except BaseException:
+        stop.set()
+        log("중단 요청: 실행 중인 솔버를 끝내고 남은 케이스를 취소합니다...")
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     return results

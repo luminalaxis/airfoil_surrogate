@@ -286,6 +286,8 @@ def cmd_train(args) -> int:
         print("\n발산(diverged) 케이스는 학습·평가에서 빼고 건수만 보고: "
               + ", ".join(f"{s} {n}" for s, n in r["diverged"].items()))
     print(f"\n결과: {r['dir']}  (metrics.csv: 수렴 상태별 포함, predictions.csv, run.json)")
+    for w in r.get("warnings", []):
+        print(f"[경고] {w}")
     return 0
 
 

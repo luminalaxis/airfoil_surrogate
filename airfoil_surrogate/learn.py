@@ -7,6 +7,7 @@
   baseline : 얇은 익형 이론 CL = 2π(α − α0) (α0는 형상의 캠버선으로 계산), log10 CD = 학습 데이터 평균
   lgbm     : LightGBM. 목표별로 평균 모델 + 분위 회귀(5%, 95%) 모델 → 90% 예측 구간
   mlp      : PyTorch 다층 퍼셉트론. 시드만 다른 n_seeds개 앙상블, 평균 = 예측, 표준편차 × 1.645 → 90% 예측 구간
+             (n_seeds = 1이면 표준편차를 정할 수 없어 예측 구간을 내지 않는다)
 
 평가 (runs/ml/<이름>/metrics.csv)
   분할(val, test, test_ood)마다 조건별 표본 수와 MAE(cl), MAE(log10_cd), 90% 예측 구간 폭·실제 포함률.
@@ -31,6 +32,7 @@ from statistics import NormalDist
 import numpy as np
 
 from .config import ConfigError, ProjectConfig
+from .fileutil import write_json_atomic
 from .dataset import MLConfig, dataset_dir, load_dataset
 
 TARGETS = ("cl", "log10_cd")
@@ -62,10 +64,28 @@ class TrainOptions:
     ood_train_fraction: float = 0.0   # test_ood 형상 중 이 비율을 학습에 추가 (개선 실험)
     name: str | None = None
 
+    def validate(self) -> None:
+        def bad(what: str) -> ConfigError:
+            return ConfigError(f"train 옵션 {what}")
+
+        for key, minimum in (("n_seeds", 1), ("epochs", 1), ("patience", 1), ("batch_size", 1)):
+            v = getattr(self, key)
+            if not isinstance(v, int) or v < minimum:
+                raise bad(f"{key}는 {minimum} 이상인 정수여야 합니다: {v!r}")
+        if not self.hidden or not all(isinstance(h, int) and h > 0 for h in self.hidden):
+            raise bad(f"hidden은 양의 정수 목록이어야 합니다: {self.hidden!r}")
+        if not (math.isfinite(self.lr) and self.lr > 0):
+            raise bad(f"lr은 0보다 커야 합니다: {self.lr!r}")
+        if not (math.isfinite(self.stall_weight) and self.stall_weight > 0):
+            raise bad(f"stall_weight는 0보다 커야 합니다: {self.stall_weight!r}")
+        if not 0 <= self.ood_train_fraction <= 1:
+            raise bad(f"ood_train_fraction은 0~1이어야 합니다: {self.ood_train_fraction!r}")
+
 
 def feature_columns(rows: list[dict], features: str) -> list[str]:
-    shape = [k for k in rows[0] if k.startswith(f"{features}_") and k[len(features) + 1] in "ul"
-             and k[len(features) + 2:].isdigit()]
+    prefix = f"{features}_"
+    shape = [k for k in rows[0] if k.startswith(prefix) and len(k) > len(prefix) + 1
+             and k[len(prefix)] in ("u", "l") and k[len(prefix) + 1:].isdigit()]
     if not shape:
         raise ConfigError(f"데이터셋에 {features}_* 열이 없습니다. [ml] cst_orders를 확인하고 dataset을 다시 만드세요.")
     return shape + ["aoa", "log10_re"]
@@ -73,6 +93,26 @@ def feature_columns(rows: list[dict], features: str) -> list[str]:
 
 def _matrix(rows: list[dict], cols: list[str]) -> np.ndarray:
     return np.array([[r[c] for c in cols] for r in rows], dtype=float)
+
+
+def _check_finite(rows: list[dict], cols: list[str], what: str) -> None:
+    """입력·목표에 빈 값/NaN/inf가 있으면 학습 전에 멈춘다 (None은 _matrix에서 NaN이 되어 MLP 손실이 NaN이 됨)."""
+    bad = []
+    for r in rows:
+        missing = [c for c in cols if not (isinstance(r.get(c), (int, float)) and math.isfinite(r[c]))]
+        if missing:
+            bad.append(f"{r.get('case')} ({', '.join(missing[:3])})")
+    if bad:
+        raise ConfigError(f"{what} 케이스 {len(bad)}개에 빈 값 또는 숫자가 아닌 값이 있습니다: {'; '.join(bad[:5])}"
+                          " - dataset을 다시 만드세요.")
+
+
+def _scale(a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """표준화용 평균·표준편차. 학습 데이터에서 값이 하나뿐인 열(예: Re 한 가지)은 표준편차 1로 둔다.
+    그러지 않으면 1e-12로 나누게 되어, 다른 값으로 예측할 때 입력이 10^12배로 커진다."""
+    mean, std = a.mean(0), a.std(0)
+    tiny = std <= 1e-8 * np.maximum(1.0, np.abs(mean))
+    return mean, np.where(tiny, 1.0, std)
 
 
 # ---------------------------------------------------------------- 모델
@@ -84,6 +124,7 @@ class Baseline:
         self.cd = float(np.mean([r["log10_cd"] for r in train]))
 
     def predict(self, rows: list[dict]) -> dict:
+        _check_finite(rows, ["aoa", "alpha0_thin_deg"], "baseline 평가")
         a = np.radians([r["aoa"] - r["alpha0_thin_deg"] for r in rows])
         return {"cl": 2 * np.pi * a, "log10_cd": np.full(len(rows), self.cd)}
 
@@ -140,8 +181,8 @@ class MLPEnsemble:
         x, xv = _matrix(train, cols), _matrix(val, cols)
         y = np.array([[r[t] for t in TARGETS] for r in train])
         yv = np.array([[r[t] for t in TARGETS] for r in val])
-        self.xm, self.xs = x.mean(0), x.std(0) + 1e-12
-        self.ym, self.ys = y.mean(0), y.std(0) + 1e-12
+        self.xm, self.xs = _scale(x)
+        self.ym, self.ys = _scale(y)
         tx = torch.tensor((x - self.xm) / self.xs, dtype=torch.float32)
         ty = torch.tensor((y - self.ym) / self.ys, dtype=torch.float32)
         tw = torch.tensor(weights / weights.mean(), dtype=torch.float32)
@@ -180,6 +221,9 @@ class MLPEnsemble:
             net.eval()
             with torch.no_grad():
                 v = float(((net(vx) - vy) ** 2).mean()) if len(vx) else float(loss)
+            if not math.isfinite(v) or not math.isfinite(loss.item()):
+                raise ConfigError(f"MLP 학습 손실이 발산했습니다 (seed {seed}, epoch {epoch + 1}, lr {self.opts.lr:g}). "
+                                  "학습률을 낮추거나 입력 데이터를 확인하세요.")
             if v < best - 1e-6:
                 best, wait = v, 0
                 best_state = {k: t.clone() for k, t in net.state_dict().items()}
@@ -196,11 +240,12 @@ class MLPEnsemble:
         x = torch.tensor((_matrix(rows, self.cols) - self.xm) / self.xs, dtype=torch.float32)
         with torch.no_grad():
             preds = np.stack([net(x).numpy() * self.ys + self.ym for net in self.nets])
-        mean, std = preds.mean(0), preds.std(0)
+        mean, std = preds.mean(0), preds.std(0, ddof=1) if len(self.nets) > 1 else None
         out = {}
         for k, t in enumerate(TARGETS):
             out[t] = mean[:, k]
-            out[f"{t}_lo"], out[f"{t}_hi"] = mean[:, k] - Z_PI * std[:, k], mean[:, k] + Z_PI * std[:, k]
+            if std is not None:  # 시드 1개로는 앙상블 분산을 정할 수 없음 → 구간 없음 (폭 0 구간을 내지 않음)
+                out[f"{t}_lo"], out[f"{t}_hi"] = mean[:, k] - Z_PI * std[:, k], mean[:, k] + Z_PI * std[:, k]
         return out
 
 
@@ -307,6 +352,7 @@ def _split_rows(rows: list[dict], ml: MLConfig, opts: TrainOptions) -> dict[str,
 
 
 def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
+    opts.validate()
     ml = MLConfig.from_dict(cfg.ml)
     rows = load_dataset(dataset_dir(cfg) / "dataset.csv")
     if not rows:
@@ -316,10 +362,22 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
     train_rows, val_rows, eval_rows = parts["train"], parts["val"], parts["eval"]
     if not train_rows or not val_rows:
         raise ConfigError(f"학습/검증 케이스가 부족합니다 (train {len(train_rows)}, val {len(val_rows)}).")
+    _check_finite(train_rows, [*cols, *TARGETS], "학습")
+    _check_finite(val_rows, [*cols, *TARGETS], "검증")
+    _check_finite(eval_rows, [*cols, *TARGETS], "평가")
     weights = np.array([opts.stall_weight if r["near_stall"] else 1.0 for r in train_rows])
 
     name = opts.name or f"{opts.features}_h{'x'.join(map(str, opts.hidden))}"
     out_dir = cfg.output_dir / ML_DIR / name
+    warnings = []
+    previous = out_dir / "run.json"
+    if previous.is_file():
+        try:
+            old = json.loads(previous.read_text(encoding="utf-8")).get("options", {})
+        except (OSError, ValueError):
+            old = {}
+        if old and old != asdict(opts) | {"name": old.get("name")}:
+            warnings.append(f"이전 결과({name})를 다른 옵션의 결과로 덮어썼습니다. 비교하려면 --name 으로 이름을 나누세요.")
     out_dir.mkdir(parents=True, exist_ok=True)
     usable = set(ml.train_states)
 
@@ -351,13 +409,13 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
                 row[f"{m}_{key}"] = float(arr[i])
         pred_rows.append(row)
     _write_csv(out_dir / "predictions.csv", pred_rows)
-    (out_dir / "run.json").write_text(json.dumps({
+    write_json_atomic(out_dir / "run.json", {
         "options": asdict(opts), "features": cols, "targets": list(TARGETS),
         "n_train": len(train_rows), "n_val": len(val_rows),
         "n_train_shapes": len({r["shape"] for r in train_rows}),
         "pi_level": PI_LEVEL, "n_boot": N_BOOT, "n_diverged_excluded": len(parts["diverged"]),
         "ood_shapes_moved_to_train": parts["moved"], **extra,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
     diverged = {s: sum(1 for r in parts["diverged"] if r["eval_split"] == s) for s in EVAL_SPLITS}
     return {"dir": out_dir, "metrics": metrics, "n_train": len(train_rows), "n_val": len(val_rows),
-            "features": cols, "moved": parts["moved"], "diverged": diverged}
+            "features": cols, "moved": parts["moved"], "diverged": diverged, "warnings": warnings}
