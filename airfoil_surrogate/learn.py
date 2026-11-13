@@ -46,6 +46,7 @@ N_BOOT = 2000                                         # 형상 단위 부트스�
 EVAL_SPLITS = ("val", "test", "test_ood")
 DIVERGED = "diverged"
 ML_DIR = "ml"
+MODELS_DIR = "models"  # runs/ml/<이름>/models/: lgbm_*.txt, mlp.pt
 # predictions.csv에 함께 남기는 데이터셋 열 (경계 사례 분석용). yplus* 열도 함께 남긴다.
 CARRY_COLUMNS = ("m", "p", "t", "converged", "conv_cl_std", "conv_cd_std", "conv_state_tsst", "cl_tsst", "log10_cd_tsst",
                  "d_cl_tsst", "d_log10_cd_tsst")
@@ -125,11 +126,27 @@ class LGBMModel:
                     {**self.params, **extra}, dtrain, num_boost_round=self.max_rounds, valid_sets=[dval],
                     callbacks=[lgb.early_stopping(100, verbose=False)])
 
+    def save(self, folder) -> None:
+        for (t, kind), booster in self.models.items():
+            booster.save_model(str(folder / f"lgbm_{t}_{kind}.txt"), num_iteration=booster.best_iteration)
+
+    @classmethod
+    def load(cls, folder, cols: list[str]) -> "LGBMModel":
+        try:
+            import lightgbm as lgb
+        except ImportError as exc:
+            raise ConfigError("lightgbm이 없습니다: pip install -e \".[ml]\"") from exc
+        obj = cls()
+        obj.cols = cols
+        obj.models = {(t, k): lgb.Booster(model_file=str(folder / f"lgbm_{t}_{k}.txt"))
+                      for t in TARGETS for k in ("mean", "lo", "hi")}
+        return obj
+
     def predict(self, rows):
         x = _matrix(rows, self.cols)
         out = {}
         for t in TARGETS:
-            pred = {k: self.models[(t, k)].predict(x, num_iteration=self.models[(t, k)].best_iteration)
+            pred = {k: self.models[(t, k)].predict(x, num_iteration=self.models[(t, k)].best_iteration or None)
                     for k in ("mean", "lo", "hi")}
             out[t] = pred["mean"]
             out[f"{t}_lo"], out[f"{t}_hi"] = np.minimum(pred["lo"], pred["hi"]), np.maximum(pred["lo"], pred["hi"])
@@ -201,6 +218,32 @@ class MLPEnsemble:
                     break
         net.load_state_dict(best_state)
         return net, {"seed": seed, "val_loss": best, "epochs": epoch + 1}
+
+    def save(self, folder) -> None:
+        import torch
+
+        torch.save({"states": [net.state_dict() for net in self.nets], "hidden": list(self.opts.hidden),
+                    "cols": self.cols, "xm": self.xm.tolist(), "xs": self.xs.tolist(),
+                    "ym": self.ym.tolist(), "ys": self.ys.tolist()}, folder / "mlp.pt")
+
+    @classmethod
+    def load(cls, folder, cols: list[str]) -> "MLPEnsemble":
+        try:
+            import torch
+        except ImportError as exc:
+            raise ConfigError("PyTorch가 없습니다: pip install -e \".[ml]\"") from exc
+        data = torch.load(folder / "mlp.pt", weights_only=True)
+        obj = cls(TrainOptions(hidden=data["hidden"]))
+        obj.cols = cols
+        obj.xm, obj.xs = np.array(data["xm"]), np.array(data["xs"])
+        obj.ym, obj.ys = np.array(data["ym"]), np.array(data["ys"])
+        obj.nets = []
+        for state in data["states"]:
+            net = obj._net(torch, len(cols))
+            net.load_state_dict(state)
+            net.eval()
+            obj.nets.append(net)
+        return obj
 
     def predict(self, rows):
         import torch
@@ -348,6 +391,9 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
     for m in opts.models:
         model = makers[m]()
         model.fit(train_rows, val_rows, cols, weights)
+        if hasattr(model, "save"):  # afs predict 용으로 학습된 모델 저장
+            (out_dir / MODELS_DIR).mkdir(exist_ok=True)
+            model.save(out_dir / MODELS_DIR)
         preds = model.predict(eval_rows)
         predictions[m] = preds
         entries = evaluate(eval_rows, preds, m, usable, ml.seed) + count_only(parts["diverged"], m)
@@ -374,6 +420,11 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
         "n_train_shapes": len({r["shape"] for r in train_rows}),
         "pi_level": PI_LEVEL, "n_boot": N_BOOT, "n_diverged_excluded": len(parts["diverged"]),
         "ood_shapes_moved_to_train": parts["moved"], **extra,
+        # 학습 데이터의 입력 범위와 받음각 값: afs predict가 범위 밖(외삽) 입력을 표시하는 데 씀
+        "feature_ranges": {c: [float(min(r[c] for r in train_rows)), float(max(r[c] for r in train_rows))]
+                           for c in cols},
+        "train_alphas": sorted({float(r["aoa"]) for r in train_rows})[:200],
+        "reynolds": sorted({float(r["reynolds"]) for r in train_rows})[:20],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     diverged = {s: sum(1 for r in parts["diverged"] if r["eval_split"] == s) for s in EVAL_SPLITS}
     return {"dir": out_dir, "metrics": metrics, "n_train": len(train_rows), "n_val": len(val_rows),

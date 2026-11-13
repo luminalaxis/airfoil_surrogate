@@ -13,6 +13,7 @@
     afs train           # 기준 방법 / LightGBM / MLP 학습·조건별 평가 → runs/ml/
     afs compare A B     # 학습 결과끼리 같은 케이스로 비교 (실험 1·2, 개선 실험)
     afs edge-cases      # 경계 사례 10개 선정 + 사례별 그래프
+    afs predict         # 학습된 LightGBM·MLP로 새 에어포일의 CL, CD 예측 (--naca / --mpt / --airfoil / --random)
     afs merge-results   # 팀원별 results.csv 합치기 (공통 스키마 확인)
     afs xfoil           # 해석툴(XFOIL)로 같은 케이스 해석 → runs/xfoil_<모드>/results.csv
     afs compare-solvers # XFOIL vs ANSYS Fluent 같은 케이스 비교 (ΔCL, ΔCD, ΔCM, parity 그래프)
@@ -455,6 +456,47 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_predict(args) -> int:
+    from pathlib import Path
+
+    from .learn import PI_TAG
+    from .predict import default_run, load_run, predict, shapes_from_args, write_predictions
+
+    cfg = _cfg(args)
+    run = args.run or default_run(cfg, args.source)
+    info, _ = load_run(cfg, run)
+    shapes = shapes_from_args(cfg, info, naca=args.naca or (), mpt=args.mpt or (), airfoils=args.airfoil or (),
+                              n_random=args.random or 0, seed=args.seed)
+    r = predict(cfg, run, shapes, args.alpha, args.re)
+    re_txt = f", Re {r['reynolds']:,.0f}" if r["reynolds"] else ""
+    print(f"모델: {run} ({', '.join(r['models'])}), 입력 {', '.join(r['features'])}{re_txt}")
+    print(f"[ ] = {PI_TAG}% 예측 구간\n")
+    head = f"{'shape':<28}{'α':>6}"
+    for m in r["models"]:
+        head += f"  {m + ' CL':>8} {'[' + PI_TAG + '%]':<17}{m + ' CD':>9} {'[' + PI_TAG + '%]':<19}"
+    print(head)
+    flagged = []
+    for o in r["rows"]:
+        line = f"{o['shape'][:27]:<28}{o['alpha']:>6g}"
+        for m in r["models"]:
+            cl_pi = f"[{o[f'{m}_cl_lo{PI_TAG}']:.3f}, {o[f'{m}_cl_hi{PI_TAG}']:.3f}]"
+            cd_pi = f"[{o[f'{m}_cd_lo{PI_TAG}']:.4f}, {o[f'{m}_cd_hi{PI_TAG}']:.4f}]"
+            line += f"  {o[f'{m}_cl']:>8.4f} {cl_pi:<17}{o[f'{m}_cd']:>9.5f} {cd_pi:<19}"
+        if o["note"]:
+            flagged.append(o)
+            line += " *"
+        print(line)
+    if flagged:
+        print(f"\n* 주의가 필요한 예측 {len(flagged)}개:")
+        for note in dict.fromkeys(f"{o['shape']} α {o['alpha']:g}°: {o['note']}" for o in flagged[:12]):
+            print(f"  {note}")
+    if r["re_note"]:
+        print(f"[경고] {r['re_note']}")
+    out = Path(args.out).resolve() if args.out else cfg.output_dir / "ml" / run / "predict.csv"
+    print(f"\n결과: {write_predictions(out, r['rows'])}")
+    return 0
+
+
 def _delta(e: dict, key: str) -> str:
     """기준 대비 차이 [95% 신뢰구간], 구간이 0을 포함하지 않으면 *."""
     if e.get(key) is None:
@@ -617,6 +659,19 @@ def main(argv=None) -> int:
                    help="처음 보는 형상(test_ood) 중 학습에 추가할 비율 (개선 실험)")
     p.add_argument("--name", help="결과 폴더 이름 (기본: 특성_은닉층)")
     p.set_defaults(func=cmd_train)
+    p = sub.add_parser("predict", help="학습된 LightGBM·MLP로 새 에어포일의 CL, CD 예측")
+    p.add_argument("--naca", nargs="+", metavar="CODE", help="NACA 4자리 코드 (예: 2412 4415)")
+    p.add_argument("--mpt", nargs=3, type=float, action="append", metavar=("M", "P", "T"),
+                   help="NACA 실수 파라미터: m [%%c] p [c/10] t [%%c] (여러 번 가능, 예: --mpt 2.3 4.1 11.7)")
+    p.add_argument("--airfoil", nargs="+", metavar="FILE", help="좌표 파일 (.dat, Selig/Lednicer)")
+    p.add_argument("--random", type=int, metavar="N", help="학습 범위 안의 무작위 NACA (m, p, t) N개")
+    p.add_argument("--seed", type=int, default=0, help="--random 난수 시드 (기본 0)")
+    p.add_argument("--alpha", nargs="+", type=float, metavar="DEG", help="받음각 (기본: 학습에 쓴 받음각)")
+    p.add_argument("--re", type=float, help="레이놀즈수 (Re가 입력인 모델만. 기본: [flow] 값)")
+    p.add_argument("--run", help="runs/ml/ 아래 학습 결과 이름 (기본: [ml] features 기준 기본 이름)")
+    p.add_argument("--source", default="fluent", choices=["fluent", "xfoil"], help="--run 을 안 줄 때 고를 정답 출처")
+    p.add_argument("--out", help="결과 CSV 경로 (기본: runs/.../ml/<run>/predict.csv)")
+    p.set_defaults(func=cmd_predict)
     p = sub.add_parser("compare", help="학습 결과끼리 같은 케이스·같은 지표로 비교 (실험 1·2, 개선 실험)")
     p.add_argument("runs", nargs="+", metavar="RUN", help="runs/ml/ 아래 결과 폴더 이름. 첫 번째가 기준")
     p.add_argument("--model", nargs="+", choices=["baseline", "lgbm", "mlp"],

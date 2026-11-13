@@ -104,6 +104,29 @@ afs dataset --source xfoil
 afs train --source xfoil
 ```
 
+**4. 새 에어포일 예측** — `afs train`이 `runs/.../ml/<이름>/models/`에 저장한 LightGBM과 MLP를 불러 CL, CD와 90% 예측 구간을 냅니다.
+
+```bash
+afs predict --naca 2412 4415
+```
+
+```bash
+afs predict --mpt 2.3 4.1 11.7 --alpha 0 8 15
+```
+
+```bash
+afs predict --random 10
+```
+
+```bash
+afs predict --airfoil my_foil.dat
+```
+
+- `--random N`은 학습 범위 안에서 무작위 NACA (m, p, t)를 뽑습니다. 결과는 `predict.csv`(`--out`으로 경로 지정)에 저장됩니다.
+- 학습 범위 밖 입력(외삽)과 학습에 없던 받음각은 `note` 열과 화면에 `*`로 표시합니다. **받음각을 0·8·15° 세 개로만 학습하므로 그 사이 각도(예: 4°)의 예측은 신뢰하기 어렵습니다** (LightGBM은 계단 모양, MLP는 세 점 사이를 임의로 이음).
+- 좌표 파일은 최대 두께·최대 캠버·캠버 위치로 (m, p, t)를 근사해 넣습니다. NACA 4자리가 아닌 형상은 근사일 뿐입니다. 임의 형상을 제대로 다루려면 `afs train --features cst16`으로 학습한 모델을 `--run cst16_h64x64`로 쓰세요.
+- 두 모델의 예측 차이(`cl_model_spread`, `cd_model_spread_rel`)가 크면 그 예측은 믿기 어렵다는 신호입니다.
+
 모드는 설정의 `[flow]`에서 정하고, 명령줄에서 덮어쓸 수 있습니다. 결과는 모드마다 `runs/<re_mode>_<난류 모델>_<메쉬 모드>_<케이스 목록>/`에 따로 쌓이고, 메쉬는 `runs/_meshes/`에서 난류 모델끼리 공유합니다.
 
 | 옵션 | 값 |

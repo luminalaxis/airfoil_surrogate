@@ -9,6 +9,7 @@
 #   2. afs compare-solvers            XFOIL vs ANSYS 같은 케이스 비교 (ΔCL, ΔCD, ΔCM, parity.png)
 #   3. afs dataset                    정답 = ANSYS (형상 단위 분할 70/15/15)
 #      afs train                      MLP + LightGBM, 입력 (m, p, t, α) → CL, log10 CD
+#   4. afs predict --naca 2412        새 에어포일의 CL, CD 예측 (--mpt M P T / --random N / --airfoil 파일.dat)
 #      (XFOIL 정답으로도 학습: afs dataset --source xfoil → afs train --source xfoil)
 
 [project]

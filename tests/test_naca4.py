@@ -527,3 +527,26 @@ def test_xfoil_vs_fluent_then_train_mlp_lgbm(tmp_path, capsys):
     assert {r["shape"]: r["split"] for r in ds_x} == {r["shape"]: r["split"] for r in ds_f}  # 같은 형상 분할
     assert main(args + ["train", "--source", "xfoil", "--epochs", "50", "--seeds", "2"]) == 0
     assert (cfg.output_dir / "ml" / "mpt_h64x64_xfoil" / "metrics.csv").is_file()
+
+    # 4. 새 에어포일 예측: 저장된 LightGBM·MLP를 불러 CL, CD
+    capsys.readouterr()
+    dat = tmp_path / "foil.dat"
+    dat.write_text("foil\n" + "\n".join(f"{x:.6f} {y:.6f}" for x, y in naca4("3412")))
+    out_csv = tmp_path / "pred.csv"
+    assert main(args + ["predict", "--naca", "2412", "--mpt", "9.0", "4.0", "12.0", "--airfoil", str(dat),
+                        "--random", "3", "--alpha", "0", "4", "8", "--out", str(out_csv)]) == 0
+    printed = capsys.readouterr().out
+    pred = _read(out_csv)
+    assert len(pred) == 6 * 3 and {"lgbm_cl", "lgbm_cd", "mlp_cl", "mlp_cd", "mlp_cd_lo90"} <= set(pred[0])
+    assert all(float(r["lgbm_cd"]) > 0 and float(r["mlp_cd"]) > 0 for r in pred)
+    by = {(r["shape"], float(r["alpha"])): r for r in pred}
+    assert by[("naca2412", 8.0)]["note"] == ""                       # 학습 범위 안, 학습한 받음각
+    assert "보간" in by[("naca2412", 4.0)]["note"]                   # 학습에 없던 받음각
+    assert "외삽" in by[("m9_p4_t12", 0.0)]["note"] and "외삽" in printed
+    foil = by[("foil", 0.0)]                                         # 좌표 파일 → (m, p, t) 근사
+    assert "근사" in foil["note"] and float(foil["m"]) == pytest.approx(3, abs=0.15) \
+        and float(foil["t"]) == pytest.approx(12, abs=0.2)
+    # 예측이 학습 정답(가짜 솔버의 CL = 0.105 (α + 1.05 m))과 같은 방향: 받음각이 크면 CL도 큼
+    assert float(by[("naca2412", 8.0)]["mlp_cl"]) > float(by[("naca2412", 0.0)]["mlp_cl"])
+    assert main(args + ["predict", "--naca", "2412", "--source", "xfoil"]) == 0
+    assert main(args + ["predict", "--naca", "2412", "--run", "nope"]) == 2
