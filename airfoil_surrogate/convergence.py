@@ -104,6 +104,10 @@ def solver_log_info(*log_paths: Path) -> dict:
     return info
 
 
+SOLVER_TAIL = 20  # Fluent가 잔차 기준으로 멈췄을 때 판정·평균에 쓰는 마지막 반복 수
+SOLVER_CONVERGED_REASON = "solver residual criteria met"
+
+
 def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConfig,
              status: dict | None = None, log_info: dict | None = None) -> dict:
     """수렴 상태와 근거 지표를 dict로 반환 (summary.csv 열 이름 그대로)."""
@@ -143,7 +147,14 @@ def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConf
     if out["conv_cl_amp"] <= cl_lim and out["conv_cd_amp"] <= cd_lim:
         return {**out, "conv_state": CONVERGED, "conv_reason": "amplitude within tolerance"}
     if log_info.get("solver_converged"):
-        return {**out, "conv_state": CONVERGED, "conv_reason": "solver residual criteria met"}
+        # Fluent가 잔차 기준으로 일찍 멈춘 경우: 기준이 느슨하면(기본값 1e-3) 계수가 아직 변하는 중일 수 있다.
+        # 마지막 SOLVER_TAIL 반복의 진폭으로 확인하고, 결과값도 이 구간만 평균한다(results.summarize_case).
+        cl_t, cd_t = cl[-SOLVER_TAIL:], cd[-SOLVER_TAIL:]
+        if np.ptp(cl_t) <= cl_lim and np.ptp(cd_t) <= cd_lim:
+            return {**out, "conv_state": CONVERGED, "conv_reason": SOLVER_CONVERGED_REASON}
+        ratio = max(np.ptp(cl_t) / cl_lim, np.ptp(cd_t) / cd_lim)
+        return {**out, "conv_state": OSCILLATING,
+                "conv_reason": f"stopped by residual criteria at {len(cl)} it, still changing {ratio:.1f}x tolerance"}
     drift = abs(out.get("conv_cl_drift", 0.0))
     kind = "drift" if drift > 0.5 * out["conv_cl_amp"] else "amplitude"
     ratio = max(out["conv_cl_amp"] / cl_lim, out["conv_cd_amp"] / cd_lim)

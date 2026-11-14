@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .cases import Case
 from .config import ProjectConfig, safe_name
-from .convergence import OSCILLATING, ConvergenceConfig, classify, coefficient_history, solver_log_info
+from .convergence import (OSCILLATING, SOLVER_CONVERGED_REASON, SOLVER_TAIL, ConvergenceConfig, classify,
+                          coefficient_history, solver_log_info)
 from .meshing import mesh_name
 from .runner import LOG_NAME, TRANSCRIPT_NAME, read_status
 
@@ -105,12 +106,9 @@ def summarize_case(cfg: ProjectConfig, case: Case) -> dict:
     window = cfg.results.average_last
     if conv.get("conv_state") == OSCILLATING and cfg.results.average_last_oscillating:
         window = cfg.results.average_last_oscillating
-    elif conv.get("conv_reason") == "solver residual criteria met":
-        # 잔차 기준으로 average_last(기본 200)보다 적은 반복에서 일찍 끝난 케이스: "마지막 N회 평균"이
-        # hybrid init 직후의 시동 과도응답까지 섞어 계수가 틀어진다(실측: NACA0012 12도 Re5e5가
-        # 144회에 수렴했는데 200개 평균 → cl 0.72로 오염, 실제 수렴값은 cl 0.96). 잔차가 이미
-        # 1e-6이라 반복당 변화가 미미하므로 짧은 창으로도 충분하다.
-        window = min(window, 20)
+    elif conv.get("conv_reason") == SOLVER_CONVERGED_REASON:
+        # 잔차 기준으로 일찍 멈춘 케이스는 반복 수가 window보다 적을 수 있어, 초기 과도 구간이 평균에 섞이지 않게 끝부분만
+        window = min(window, SOLVER_TAIL)
     for path, headers, data in reports:
         for key, value in summarize_rows(headers, data, window).items():
             if key == "iter_done":
