@@ -1,6 +1,6 @@
 # 단일 익형 양항계수 데이터셋 (인공지능개론 텀프로젝트: CFD 없이 CL/CD를 예측하는 회귀 모델)
 #   형상 120개 (NACA 4자리 60 + UIUC 60) × 받음각 14개 × Re 2개 = 3,360 케이스
-#   Fluent 2D 정상 상태, k-ω SST, 자유류 (직사각형 영역: 앞 = inlet, 위·아래 = 미끄럼 벽, 뒤 = outlet)
+#   Fluent 2D 정상 상태, k-ω SST, 자유류 (원형 영역 반지름 50c: 앞쪽 반원 = inlet, 뒤쪽 반원 = outlet)
 #
 #   afs fetch-airfoils   UIUC 좌표 파일 내려받기 (airfoils/*.dat)
 #   afs plan --dry-run   케이스 목록 확인
@@ -29,7 +29,7 @@ graphics = false             # 3,360 케이스라 이미지 저장은 끔 (필�
 timeout_minutes = 30
 
 [constants]
-base_case = "base_airfoil.cas.h5"   # docs/FLUENT_BASE_CASE_AIRFOIL.md 참고 (경계 main, inlet, top, bottom, outlet)
+base_case = "base_airfoil.cas.h5"   # docs/FLUENT_BASE_CASE_AIRFOIL.md 참고 (경계 main, inlet, outlet)
 turbulence_model = "kw-sst"         # 기록용 (실제 모델은 베이스 케이스 설정). Transition SST 비교 시 바꿔서 기록
 chord = 0.3                         # 코드 [m]: 메쉬 스케일과 Re→유속 환산에만 쓰임 (계수는 Re만의 함수)
 iterations = 3000
@@ -49,12 +49,12 @@ mach = "velocity / 340.29"
 
 [mesh]
 # chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 5e5 기준 → y+ ≤ 1)
-farfield_shape = "box"       # 직사각형 인클로저 (원형은 "circle")
-box_upstream = 20            # 앞전 ~ inlet(앞 경계) [c]
-box_downstream = 40          # 앞전 ~ outlet(뒤 경계) [c]
-box_height = 20              # 시위선 ~ 위·아래 경계 [c] (전체 높이 40c)
-box_far_size = 2.0           # 바깥 경계 셀 크기 [c]
-                             # 경계: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall → Fluent에서 미끄럼 벽), 뒤 = outlet(pressure-outlet)
+farfield_shape = "circle"    # 원형 원거리 경계
+farfield_radius = 50         # 원 반지름 [c] (코드 0.3 m → 15 m)
+farfield_size = 5.0          # 원거리 경계 셀 크기 [c]
+farfield_split = true        # 앞쪽 반원 = inlet(velocity-inlet), 뒤쪽 반원 = outlet(pressure-outlet)
+                             # 받음각은 inlet 속도 성분(speed·cos α, speed·sin α)으로 넣음.
+                             # 직사각형(box) + 위·아래 벽은 유입이 수평으로 꺾여 NACA 0012 4°에서 Cl ≈ 0.10이 나와 쓰지 않음
 y_plus = 1.0
 growth_rate = 1.15
 surface_cells = 200

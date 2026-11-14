@@ -17,7 +17,7 @@ afs mesh --only "naca0012*"
 ```
 
 `runs/_meshes/0012_c0.3/mesh.msh`가 생깁니다 (NACA 0012, 코드 0.3 m, 약 5만 셀, 첫 셀 높이는 Re 5×10⁵에서 y+ ≈ 1).
-`geometry.png`, `mesh.png`, `mesh_le.png`로 형상과 경계층을, `mesh_domain.png`로 전체 직사각형 영역을 먼저 확인하세요.
+`geometry.png`, `mesh.png`, `mesh_le.png`로 형상과 경계층을, `mesh_domain.png`로 전체 원형 영역(반지름 50c)을 먼저 확인하세요.
 
 Fluent Launcher: Dimension **2D**, **Double Precision**, Solver Processes 4, Working Directory = `examples\airfoil_dataset`
 
@@ -25,16 +25,14 @@ Fluent Launcher: Dimension **2D**, **Double Precision**, Solver Processes 4, Wor
 
 1. `File > Read > Mesh...` → `runs\_meshes\0012_c0.3\mesh.msh`
 2. `Domain > Mesh > Check`: 끝에 `Done.`, ERROR 없음
-   - Domain Extents가 x −6 ~ 12 m, y −6 ~ 6 m (직사각형: 앞전 기준 앞 20c, 뒤 40c, 위·아래 20c, 코드 0.3 m)
+   - Domain Extents가 x 약 −14.85 ~ 15.15 m, y −15 ~ 15 m (원: 중심 x = 0.5c, 반지름 50c, 코드 0.3 m)
 3. `Domain > Mesh > Quality`: Minimum Orthogonal Quality 0.1 이상이면 양호
 4. 경계 이름과 타입
 
 | 경계 | 타입 | 위치 |
 |---|---|---|
-| `inlet` | velocity-inlet | 직사각형의 앞 변 |
-| `top` | wall (미끄럼 벽) | 직사각형의 위 변 |
-| `bottom` | wall (미끄럼 벽) | 직사각형의 아래 변 |
-| `outlet` | pressure-outlet | 직사각형의 뒤 변 |
+| `inlet` | velocity-inlet | 원의 앞쪽 반원 |
+| `outlet` | pressure-outlet | 원의 뒤쪽 반원 |
 | `main` | wall | 익형 |
 | `interior-fluid` | interior | |
 
@@ -77,12 +75,9 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 ### `outlet` (pressure-outlet)
 - Gauge Pressure 0, Backflow 난류 값은 inlet과 같게
 
-### `top`, `bottom` (wall, 미끄럼 벽)
-- 직사각형의 위·아래 변. 두 경계를 함께 선택해 한 번에 설정할 수 있습니다.
-- Momentum 탭: Wall Motion **Stationary Wall**, Shear Condition **Specified Shear**, Shear Stress X = **0**, Y = **0** [Pa]
-- 기본값(No Slip)으로 두면 바깥 경계를 따라 경계층이 자라서 유동이 막히므로 반드시 바꿉니다.
-- 확인: `/define/boundary-conditions/list-zones`에서 `top`, `bottom`이 wall이고, 경계 설정 창의 Shear Condition이 Specified Shear인지 봅니다.
-- 위·아래가 벽이라 받음각만큼 기울어진 유입이 위·아래 변에서 수평으로 꺾입니다. 영역 높이(`box_height`, 기본 ±20c)가 충분히 커서 익형 주변의 받음각 영향은 작지만, 파일럿 실행에서 높은 받음각의 cl을 실측값과 비교해 확인하세요.
+> 예전 직사각형 영역(위·아래 = 미끄럼 벽)은 쓰지 않습니다. 기울어진 유입이 위·아래 벽에서 수평으로 꺾여
+> 익형이 실제 받음각보다 훨씬 작은 각도를 봅니다 (NACA 0012, 4°, Re 2×10⁵에서 Cl ≈ 0.10, 위·아래를 velocity-inlet으로 바꿔도 0.26).
+> 원형 영역에서는 같은 조건에서 Cl ≈ 0.41이고, outlet의 평균 Y 속도도 inlet과 거의 같습니다.
 
 ### `main` (wall)
 - Stationary Wall, No Slip (기본값)
@@ -91,6 +86,7 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 
 - Compute from: **inlet**
 - Area **0.3**, Length **0.3** (코드 0.3 m × 폭 1 m), Density 1.225, Velocity 9.738
+- 경계조건을 바꾼 뒤 기준값이 0으로 바뀌는 일이 있습니다(계수가 `inf`로 나옴). **마지막에** 값을 직접 다시 확인하세요.
 
 케이스마다 저널이 Velocity·Length·Area를 다시 넣습니다.
 
@@ -104,12 +100,16 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 
 ## 9. Report Definitions와 Report File
 
-`Solution > Report Definitions > New > Force Report > Force...`
+`Solution > Report Definitions > New > Force Report >` **Drag...** / **Lift...**
 
-| Name | Report Output Type | Force Vector (X, Y) | Zones |
-|---|---|---|---|
-| `cx` | Force Coefficient | 1, 0 | main |
-| `cy` | Force Coefficient | 0, 1 | main |
+| Name | 메뉴 | Report Output Type | Force Vector (X, Y) | Zones |
+|---|---|---|---|---|
+| `cx` | Drag... | **Drag Coefficient** | 1, 0 | main |
+| `cy` | Lift... | **Lift Coefficient** | 0, 1 | main |
+
+- `Force...` 메뉴로 만들면 Fluent 2026 R1에서는 계수가 아니라 **힘[N]**이 기록됩니다. 반드시 Drag/Lift 메뉴의 Coefficient로 만드세요.
+  (확인: `Results > Reports > Forces`의 Coefficients – Total과 `cx`, `cy` 값이 같아야 합니다.)
+- 각 리포트 창 아래 Create 영역의 **Report File 체크를 해제**하세요. 체크돼 있으면 `cx-rfile.out` 같은 파일이 따로 생깁니다.
 
 이름은 정확히 `cx`, `cy`여야 합니다. 도구가 받음각 α로 `cl = cy·cosα − cx·sinα`, `cd = cx·cosα + cy·sinα`를 계산하므로 받음각마다 힘 방향을 바꿀 필요가 없습니다.
 
@@ -122,6 +122,8 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 
 `Solution > Monitors > Report Files > New...`
 - Name **`coef-rfile`**, 위 4개 리포트(`cx`, `cy`, `yplus-max`, `yplus-avg`) 추가, File Name `coef-rfile.out`, Get Data Every 1 Iteration
+- 확인: `/solve/report-files/list`에 `coef-rfile` **하나만** 있고, `/solve/report-files/list-properties coef-rfile`의 File Name이 `.\coef-rfile.out`이어야 합니다 (`_1_1`이 붙으면 이름을 다시 지정).
+- GUI로 메쉬를 읽으면 이 파일이 Working Directory가 아니라 **메쉬 폴더**(`runs\_meshes\0012_c0.3\`)에 생깁니다. 확인 후 지우세요. `afs run`에서는 케이스 폴더에 생깁니다.
 
 이 파일의 반복별 이력으로 수렴 상태(converged / oscillating / diverged)를 판정하고, 결과값(수렴: 마지막 200회 평균, 진동: 마지막 500회 평균)과 y+(`summary.csv`의 `yplus-max`, `yplus-avg`)를 기록합니다.
 
@@ -130,10 +132,11 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 1. `Solution > Initialization`: **Hybrid** → Initialize
 2. `Run Calculation`: 20 iterations → Calculate
 3. 오류 없이 돌고 `coef-rfile.out`이 생기는지 확인
+4. (권장) 수렴할 때까지 돌린 뒤 확인: inlet·outlet의 평균 Y Velocity가 둘 다 약 0.68 m/s, `cy` ≈ 0.41, `cx` ≈ −0.012 (4°, Re 2×10⁵)
 
 ## 11. 저장
 
-`File > Write > Case...` → `examples\airfoil_dataset\base_airfoil.cas.h5` (Case만 저장, 데이터 불필요)
+`File > Write > Case...` → `examples\airfoil_dataset\base_airfoil.cas.h5` (Case만 저장, 데이터 불필요). 저장 창이 메쉬 폴더를 가리키고 있을 수 있으니 폴더를 직접 옮겨서 저장하세요.
 
 ## 12. 파일럿 실행
 
@@ -147,7 +150,7 @@ afs collect --only "naca0012*"
 
 확인할 것
 - `runs\naca0012\naca0012_Re200000_a4\solver.log`에 Error가 없는지
-- `runs\summary.csv`의 해당 행: `cl` ≈ 0.42~0.46, `cd` ≈ 0.011~0.015 (완전 난류 SST, Re 2×10⁵), `conv_state`, `yplus-max`(첫 셀 높이 기준값 1을 크게 넘지 않는지, 예: 5 이하)
+- `runs\summary.csv`의 해당 행: `cl` ≈ 0.40~0.46, `cd` ≈ 0.012~0.017 (완전 난류 SST, Re 2×10⁵), `conv_state`, `yplus-max`(첫 셀 높이 기준값 1을 크게 넘지 않는지, 예: 5 이하)
 - `convergence.png` 제목에 수렴 상태가 표시됨
 - 케이스당 소요 시간 (`afs status`) → 3,360 케이스 전체 일정 계산
 

@@ -123,7 +123,7 @@ def test_airfoil_dataset_example_config():
     assert len(cases) == 120 * 14 * 2
     assert len({c.mesh.name for c in cases}) == 120          # 형상당 메쉬 1개 (받음각·Re 공유)
     assert all(c.mesh.settings.reynolds == 500000 for c in cases)  # 첫 셀 높이는 큰 Re 기준
-    assert all(c.mesh.settings.farfield_shape == "box" for c in cases)
+    assert all(c.mesh.settings.farfield_shape == "circle" and c.mesh.settings.farfield_split for c in cases)
     c = next(c for c in cases if c.name == "naca2412_Re200000_a4")
     assert str(c.params["main_airfoil"]) == "2412" and c.params["flow_angle"] == 4
     assert c.params["velocity"] == pytest.approx(200000 * 1.7894e-5 / (1.225 * 0.3))

@@ -17,8 +17,7 @@
 
 /file/read-case "${project_dir}/${base_case}"
 
-; 형상별 메쉬로 교체 (경계 이름 main / inlet / top / bottom / outlet 이 같아서 설정이 유지됨)
-; top / bottom 의 미끄럼 벽(Specified Shear 0) 설정도 베이스 케이스에서 그대로 유지됨
+; 형상별 메쉬로 교체 (경계 이름 main / inlet / outlet 이 같아서 설정이 유지됨)
 /file/replace-mesh "${mesh_file}"
 /mesh/check
 
