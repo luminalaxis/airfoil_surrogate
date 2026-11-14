@@ -99,6 +99,9 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 - `Solution > Monitors > Residual`: **Absolute Criteria를 모두 1e-6**으로 낮춥니다.
   - 기본값(1e-3)이면 힘 계수가 수렴하기 전에 계산이 멈춥니다.
   - 1e-6에 도달하면 Fluent가 "solution is converged"를 출력하고 일찍 끝나며, 도구는 이 경우를 `converged`로 기록합니다.
+  - 메쉬를 바꾸거나 케이스를 다시 만들면 기본값 1e-3으로 돌아가 있을 수 있습니다. 저장 전에 다시 확인하세요.
+    기준이 1e-3이면 100회 안팎에서 계수가 아직 변하는 중에 멈춥니다. 도구는 이때 마지막 20회가 안정적이지 않으면
+    `oscillating`(`conv_reason` = `stopped by residual criteria at N it ...`)으로 기록하니, 이 문구가 보이면 잔차 기준을 고치세요.
 
 ## 9. Report Definitions와 Report File
 

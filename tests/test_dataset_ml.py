@@ -72,8 +72,13 @@ def test_convergence_states():
     assert classify(_hist(np.full(500, 50.0)), cfg)["conv_state"] == "diverged"
     assert classify(None, cfg, {"state": "failed", "message": "로그 오류: Divergence detected"})["conv_state"] == "diverged"
     assert classify(None, cfg, {"state": "failed", "message": "종료 코드 3"})["conv_state"] == "no_data"
-    # 진동하지만 Fluent가 잔차 기준으로 수렴을 선언한 경우
-    assert classify(_hist(0.8 + 0.05 * np.sin(it / 5)), cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
+    # Fluent가 잔차 기준으로 수렴을 선언한 경우: 마지막 20 반복이 안정적이면 converged
+    settled = _hist(np.r_[0.8 + 0.05 * np.sin(it[:480] / 5), np.full(20, 0.8)])
+    assert classify(settled, cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
+    # 느슨한 잔차 기준(예: 1e-3)으로 77회 만에 멈췄는데 계수가 아직 변하는 중이면 converged로 보지 않음
+    early = _hist(0.4 + 0.5 * np.exp(-np.arange(77) / 30))
+    res = classify(early, cfg, log_info={"solver_converged": True})
+    assert res["conv_state"] == "oscillating" and res["conv_reason"].startswith("stopped by residual criteria at 77 it")
 
 
 def test_solver_log_residuals(tmp_path):

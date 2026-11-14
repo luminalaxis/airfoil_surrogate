@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .cases import Case
 from .config import ProjectConfig, safe_name
-from .convergence import OSCILLATING, ConvergenceConfig, classify, coefficient_history, solver_log_info
+from .convergence import (OSCILLATING, SOLVER_CONVERGED_REASON, SOLVER_TAIL, ConvergenceConfig, classify,
+                          coefficient_history, solver_log_info)
 from .meshing import mesh_name
 from .runner import LOG_NAME, TRANSCRIPT_NAME, read_status
 
@@ -105,6 +106,9 @@ def summarize_case(cfg: ProjectConfig, case: Case) -> dict:
     window = cfg.results.average_last
     if conv.get("conv_state") == OSCILLATING and cfg.results.average_last_oscillating:
         window = cfg.results.average_last_oscillating
+    if conv.get("conv_reason") == SOLVER_CONVERGED_REASON:
+        # 잔차 기준으로 일찍 멈춘 케이스는 반복 수가 window보다 적을 수 있어, 초기 과도 구간이 평균에 섞이지 않게 끝부분만
+        window = min(window, SOLVER_TAIL)
     for path, headers, data in reports:
         for key, value in summarize_rows(headers, data, window).items():
             if key == "iter_done":
