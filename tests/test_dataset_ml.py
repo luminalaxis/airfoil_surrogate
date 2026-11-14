@@ -150,6 +150,37 @@ def test_split_farfield_mesh(tmp_path):
     assert set(info["zones"]) == {"interior-fluid", "main", "inlet", "outlet"}
 
 
+def test_split_farfield_outlet_angle(tmp_path):
+    """outlet 반각을 줄이면 outlet 면은 모두 뒤쪽 ±β 안에 있고, inlet이 위·아래를 덮는다."""
+    import math
+
+    import numpy as np
+
+    from airfoil_surrogate.meshing import make_job, generate_mesh
+    from airfoil_surrogate.fluent_msh import read_msh
+
+    job = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5},
+                   {"farfield_split": True, "farfield_outlet_angle": 60, "surface_cells": 80,
+                    "near_size": 0.03, "wake_size": 0.03, "farfield_radius": 20}, tmp_path)
+    info = generate_mesh(job, tmp_path, plots=False)
+    assert set(info["zones"]) == {"interior-fluid", "main", "inlet", "outlet"}
+    msh = read_msh(job.mesh_file)
+    nodes = msh["nodes"]
+    zone = {name: (zid, bc) for zid, (bc, name) in msh["names"].items()}
+    for name, bc, inside in (("outlet", "pressure-outlet", True), ("inlet", "velocity-inlet", False)):
+        zid, zone_bc = zone[name]
+        assert zone_bc == bc
+        mids = np.array([(nodes[f[0] - 1] + nodes[f[1] - 1]) / 2 for f in (msh["faces"][i] for i in msh["zones"][zid])])
+        ang = np.degrees(np.arctan2(mids[:, 1], mids[:, 0] - 0.5))
+        assert np.all((np.abs(ang) < 60) == inside), name
+    # 기본값(90°)은 지문에 들어가지 않아 기존 메쉬를 다시 만들지 않는다
+    base = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5}, {"farfield_split": True}, tmp_path)
+    same = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5},
+                    {"farfield_split": True, "farfield_outlet_angle": 90.0}, tmp_path)
+    assert base.fingerprint() == same.fingerprint() != job.fingerprint()
+    assert math.isclose(job.settings.farfield_outlet_angle, 60)
+
+
 def test_box_enclosure_mesh(tmp_path):
     from airfoil_surrogate.fluent_msh import check_msh, read_msh
     from airfoil_surrogate.meshing import make_job, generate_mesh

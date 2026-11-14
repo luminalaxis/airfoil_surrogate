@@ -31,8 +31,8 @@ Fluent Launcher: Dimension **2D**, **Double Precision**, Solver Processes 4, Wor
 
 | 경계 | 타입 | 위치 |
 |---|---|---|
-| `inlet` | velocity-inlet | 원의 앞쪽 반원 |
-| `outlet` | pressure-outlet | 원의 뒤쪽 반원 |
+| `inlet` | velocity-inlet | 원의 앞쪽과 위·아래 (뒤쪽 ±60°를 뺀 240°) |
+| `outlet` | pressure-outlet | 원의 뒤쪽 ±60° 호 |
 | `main` | wall | 익형 |
 | `interior-fluid` | interior | |
 
@@ -78,6 +78,8 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 > 예전 직사각형 영역(위·아래 = 미끄럼 벽)은 쓰지 않습니다. 기울어진 유입이 위·아래 벽에서 수평으로 꺾여
 > 익형이 실제 받음각보다 훨씬 작은 각도를 봅니다 (NACA 0012, 4°, Re 2×10⁵에서 Cl ≈ 0.10, 위·아래를 velocity-inlet으로 바꿔도 0.26).
 > 원형 영역에서는 같은 조건에서 Cl ≈ 0.41이고, outlet의 평균 Y 속도도 inlet과 거의 같습니다.
+> outlet을 뒤쪽 반원 전체로 두면 받음각만큼 outlet으로 공기가 거꾸로 들어와(`Reversed flow` 경고) 12°에서 계수가 크게 진동했습니다.
+> 그래서 outlet은 뒤쪽 ±60°만 씁니다(`farfield_outlet_angle = 60`). 계산 중 `Reversed flow ... pressure-outlet` 경고가 나오면 이 각도를 확인하세요.
 
 ### `main` (wall)
 - Stationary Wall, No Slip (기본값)

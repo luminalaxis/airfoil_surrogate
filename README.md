@@ -8,7 +8,7 @@
 project.toml (익형 × 받음각 × Re)
    │ fetch-airfoils  UIUC 좌표 파일 내려받기
    │ mesh    형상별 gmsh 메쉬 → Fluent .msh (받음각·Re만 다른 케이스는 메쉬 공유, CPU 코어 수만큼 동시에)
-   │         원형 영역(반지름 50c): 앞쪽 반원 inlet / 뒤쪽 반원 outlet  (직사각형 box도 가능)
+   │         원형 영역(반지름 50c): inlet / 뒤쪽 ±60° outlet  (직사각형 box도 가능)
    │ check   Fluent 없이 실행 준비 점검: 베이스 케이스, 메쉬, 경계 이름, 저널, 경로, 디스크·시간 추정
    │ run     케이스별 저널 → fluent 2ddp -t4 -hidden -wait -i run.jou   (--part K/N: 팀원 분담)
    │ collect summary.csv (cl, cd, 수렴 상태 conv_state, y+)
@@ -45,7 +45,7 @@ pip install -e ".[ml]"
 | 형상 | NACA 4자리 60개(공식 생성) + UIUC 60개(`airfoils.csv`). UIUC 중 **캠버 6.5% 이상 10개**(`family = high_camber`: s1223, s1210, e423, ch10sm, fx74cl5140, mh114, dae11, dae21, goe226, e591)는 학습에서 빼고 "처음 보는 형상" 평가에만 씀 |
 | 받음각 | −4, −2, 0, 2, 4, 6, 8, 10, 11~16° (14개, 실속 부근 1° 간격) |
 | Re | 2×10⁵, 5×10⁵ (코드 0.3 m 기준 유속 9.7, 24.3 m/s) |
-| 해석 | Fluent 2D 정상 상태 k-ω SST, 원형 영역(반지름 50c, 앞쪽 반원 = inlet, 뒤쪽 반원 = outlet, 받음각은 inlet 속도 성분), 형상당 메쉬 1개 |
+| 해석 | Fluent 2D 정상 상태 k-ω SST, 원형 영역(반지름 50c, 뒤쪽 ±60° = outlet, 나머지 = inlet, 받음각은 inlet 속도 성분), 형상당 메쉬 1개 |
 | 입력 → 목표 | CST 계수 16개(면당 8개) + 받음각 + log10(Re) → CL, log10(CD) |
 | 라벨 규칙 | 케이스마다 수렴 상태(`conv_state`)와 y+(`yplus_max`, `yplus_avg`) 기록. 수렴 케이스는 마지막 200회, 진동 케이스는 마지막 500회 반복 평균. 발산 케이스는 학습·평가에서 빼고 건수만 보고 |
 | 평가 | 조건별 MAE와 표본 수, 형상 단위 부트스트랩 95% 신뢰구간, 90% 예측 구간의 실제 포함률. 실행 간 비교는 공통 케이스만으로(`compare`), 경계 사례 10개(`edge-cases`) |
@@ -221,7 +221,8 @@ tsst_summary = "runs_tsst/summary.csv"
 | `wake_length`, `wake_angles` | 3.0, [-10, 0, 10, 20] | 후류 세분화 길이와 방향 (받음각 범위를 덮도록) |
 | `farfield_shape` | `"circle"` | 영역 모양. `"circle"` = 원형 원거리 경계, `"box"` = 직사각형 인클로저 (예제는 `"circle"` + `farfield_split = true`. box는 위·아래 벽이 유입을 수평으로 꺾어 받음각이 작아지므로 받음각을 유입 방향으로 넣는 경우 쓰지 마세요) |
 | `farfield_radius`, `farfield_size` | 50, 5.0 | (circle) 원거리 경계 반지름과 셀 크기 [c] |
-| `farfield_split` | false | (circle) true면 원거리 경계를 앞 반원 `inlet`(velocity-inlet) + 뒤 반원 `outlet`(pressure-outlet)으로 나눔. 밀도 일정(비압축) 해석용 |
+| `farfield_split` | false | (circle) true면 원거리 경계를 `inlet`(velocity-inlet) + `outlet`(pressure-outlet)으로 나눔. 밀도 일정(비압축) 해석용 |
+| `farfield_outlet_angle` | 90 | (circle, split) outlet 호의 반각 [deg]. 뒤쪽 ±이 각도가 `outlet`, 나머지가 `inlet`. 받음각 α에서 outlet 역류가 없으려면 90 − \|α\|보다 작게 (예제 60) |
 | `box_upstream`, `box_downstream`, `box_height` | 20, 40, 20 | (box) 앞전 ~ 앞 경계, 앞전 ~ 뒤 경계, 시위선 ~ 위·아래 경계 거리 [c]. 앞 = `inlet`(velocity-inlet), 위·아래 = `top`·`bottom`(wall, Fluent에서 미끄럼 벽 = Specified Shear 0), 뒤 = `outlet`(pressure-outlet) |
 | `box_far_size` | 2.0 | (box) 바깥 경계 셀 크기 [c] |
 | `min_quality` | 0.05 | 최소 셀 품질 (삼각형 SICN, 사각형 scaled Jacobian). 미달 시 경계층을 얇게 해서 재시도 |

@@ -49,7 +49,9 @@ refine = "1.5 ** (mesh_level - 2)"   # [mesh] refine: 단계마다 셀 크기 1.
 farfield_shape = "circle"    # 원형 원거리 경계
 farfield_radius = 50         # 원 반지름 [c] (코드 0.3 m → 15 m)
 farfield_size = 5.0          # 원거리 경계 셀 크기 [c]
-farfield_split = true        # 앞쪽 반원 = inlet(velocity-inlet), 뒤쪽 반원 = outlet(pressure-outlet)
+farfield_split = true        # 원거리 경계를 inlet(velocity-inlet) + outlet(pressure-outlet)으로 나눔
+farfield_outlet_angle = 60   # outlet = 뒤쪽 ±60° 호, 나머지 240°는 inlet. 반원(90°)으로 나누면 받음각만큼
+                             # outlet으로 공기가 거꾸로 들어와 12°에서 계수가 크게 진동함 (|α| < 30°까지 역류 없음)
                              # 받음각은 inlet 속도 성분(speed·cos α, speed·sin α)으로 넣음.
                              # 직사각형(box) + 위·아래 벽은 유입이 수평으로 꺾여 NACA 0012 4°에서 Cl ≈ 0.10이 나와 쓰지 않음
 y_plus = 1.0
