@@ -32,7 +32,9 @@ timeout_minutes = 30
 base_case = "base_airfoil.cas.h5"   # docs/FLUENT_BASE_CASE_AIRFOIL.md 참고 (경계 main, inlet, outlet)
 turbulence_model = "kw-sst"         # 기록용 (실제 모델은 베이스 케이스 설정). Transition SST 비교 시 바꿔서 기록
 chord = 0.3                         # 코드 [m]: 메쉬 스케일과 Re→유속 환산에만 쓰임 (계수는 Re만의 함수)
-iterations = 3000
+iterations = 600                    # 가상시간 스텝 축소(journal.jou) 후 수렴 케이스는 100~150회면 끝남.
+                                     # 진동(실속 후) 케이스도 주기가 13~18회라 500회 평균 창에 30주기 이상
+                                     # 들어가 3000회 끝까지 돌린 값과 1% 이내로 일치(NACA0012 16°, Re 5e5 실측)
 
 [cases]
 csv = "airfoils.csv"                # 열: airfoil(짧은 이름), main_airfoil(NACA 코드 또는 좌표 파일), family
