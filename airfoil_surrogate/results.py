@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .cases import Case
 from .config import ProjectConfig, safe_name
-from .convergence import (OSCILLATING, SOLVER_CONVERGED_REASON, SOLVER_TAIL, ConvergenceConfig, classify,
+from .convergence import (OSCILLATING, SOLVER_CONVERGED_REASON, SOLVER_STOPPED_REASON, SOLVER_TAIL, ConvergenceConfig, classify,
                           coefficient_history, solver_log_info)
 from .meshing import mesh_name
 from .runner import LOG_NAME, TRANSCRIPT_NAME, read_status
@@ -104,11 +104,11 @@ def summarize_case(cfg: ProjectConfig, case: Case) -> dict:
         conv.update({k: v for k, v in log_info.items() if k.startswith("res_")})
     # 결과값 = 마지막 N 반복 평균. 진동 케이스는 average_last_oscillating(예: 500)으로 더 길게 평균
     window = cfg.results.average_last
-    if conv.get("conv_state") == OSCILLATING and cfg.results.average_last_oscillating:
-        window = cfg.results.average_last_oscillating
-    elif conv.get("conv_reason") == SOLVER_CONVERGED_REASON:
+    if str(conv.get("conv_reason", "")).startswith((SOLVER_CONVERGED_REASON, SOLVER_STOPPED_REASON)):
         # 잔차 기준으로 일찍 멈춘 케이스는 반복 수가 window보다 적을 수 있어, 초기 과도 구간이 평균에 섞이지 않게 끝부분만
         window = min(window, SOLVER_TAIL)
+    elif conv.get("conv_state") == OSCILLATING and cfg.results.average_last_oscillating:
+        window = cfg.results.average_last_oscillating
     for path, headers, data in reports:
         for key, value in summarize_rows(headers, data, window).items():
             if key == "iter_done":

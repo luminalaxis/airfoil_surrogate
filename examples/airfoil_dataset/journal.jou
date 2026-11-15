@@ -39,6 +39,10 @@
 ; 144회에 완전히 수렴합니다(cl=1.15, 잔차 1e-6). 저각도 케이스는 이 값으로도 빠르게 수렴해 손해가 없습니다.
 /solve/set/pseudo-time-method/global-time-step-settings yes 1 0.05
 
+; 잔차 기준(continuity, x-velocity, y-velocity, k, omega)을 1e-6으로. 베이스 케이스가 기본값 1e-3으로
+; 저장돼 있으면 100회 안팎에서 계수가 아직 변하는 중에 멈추므로 매 케이스 여기서 강제합니다.
+/solve/monitors/residual/convergence-criteria 1e-6 1e-6 1e-6 1e-6 1e-6
+
 /solve/initialize/hyb-initialization
 /solve/iterate ${iterations}
 

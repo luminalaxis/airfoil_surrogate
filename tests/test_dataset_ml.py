@@ -79,6 +79,9 @@ def test_convergence_states():
     early = _hist(0.4 + 0.5 * np.exp(-np.arange(77) / 30))
     res = classify(early, cfg, log_info={"solver_converged": True})
     assert res["conv_state"] == "oscillating" and res["conv_reason"].startswith("stopped by residual criteria at 77 it")
+    # 96회에 수렴 선언, 초기 과도 구간에 |계수| > 10이 있어도 발산으로 보지 않음 (NACA 0018 사례)
+    transient = _hist(np.r_[np.full(10, 30.0), np.full(86, 0.6)])
+    assert classify(transient, cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
 
 
 def test_solver_log_residuals(tmp_path):

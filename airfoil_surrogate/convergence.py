@@ -106,6 +106,7 @@ def solver_log_info(*log_paths: Path) -> dict:
 
 SOLVER_TAIL = 20  # Fluent가 잔차 기준으로 멈췄을 때 판정·평균에 쓰는 마지막 반복 수
 SOLVER_CONVERGED_REASON = "solver residual criteria met"
+SOLVER_STOPPED_REASON = "stopped by residual criteria"
 
 
 def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConfig,
@@ -123,7 +124,10 @@ def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConf
         return {"conv_state": NO_DATA, "conv_reason": ""}
 
     cl, cd = history
-    tail = slice(-max(2, cfg.window), None)
+    # Fluent가 잔차 기준으로 일찍 멈춘 경우(예: 96회) window(200)에 초기 과도 구간이 섞여 범위 검사에서
+    # 발산으로 잘못 판정되므로, 판정·지표·평균(results.summarize_case) 모두 마지막 SOLVER_TAIL 반복만 쓴다.
+    solver_converged = bool(log_info.get("solver_converged"))
+    tail = slice(-max(2, SOLVER_TAIL if solver_converged else cfg.window), None)
     cl_w, cd_w = cl[tail], cd[tail]
     out["conv_iters"] = len(cl)
     finite = np.all(np.isfinite(cl_w)) and np.all(np.isfinite(cd_w))
@@ -144,18 +148,15 @@ def classify(history: tuple[np.ndarray, np.ndarray] | None, cfg: ConvergenceConf
 
     cl_lim = max(cfg.cl_tol, cfg.cl_rel_tol * abs(float(np.mean(cl_w))))
     cd_lim = max(cfg.cd_tol, cfg.cd_rel_tol * abs(float(np.mean(cd_w))))
-    if out["conv_cl_amp"] <= cl_lim and out["conv_cd_amp"] <= cd_lim:
-        return {**out, "conv_state": CONVERGED, "conv_reason": "amplitude within tolerance"}
-    if log_info.get("solver_converged"):
-        # Fluent가 잔차 기준으로 일찍 멈춘 경우: 기준이 느슨하면(기본값 1e-3) 계수가 아직 변하는 중일 수 있다.
-        # 마지막 SOLVER_TAIL 반복의 진폭으로 확인하고, 결과값도 이 구간만 평균한다(results.summarize_case).
-        cl_t, cd_t = cl[-SOLVER_TAIL:], cd[-SOLVER_TAIL:]
-        if np.ptp(cl_t) <= cl_lim and np.ptp(cd_t) <= cd_lim:
+    ratio = max(out["conv_cl_amp"] / cl_lim, out["conv_cd_amp"] / cd_lim)
+    if solver_converged:
+        # 잔차 기준이 느슨하면(기본값 1e-3) 계수가 아직 변하는 중일 수 있어 마지막 구간 진폭으로 확인
+        if ratio <= 1:
             return {**out, "conv_state": CONVERGED, "conv_reason": SOLVER_CONVERGED_REASON}
-        ratio = max(np.ptp(cl_t) / cl_lim, np.ptp(cd_t) / cd_lim)
         return {**out, "conv_state": OSCILLATING,
-                "conv_reason": f"stopped by residual criteria at {len(cl)} it, still changing {ratio:.1f}x tolerance"}
+                "conv_reason": f"{SOLVER_STOPPED_REASON} at {len(cl)} it, still changing {ratio:.1f}x tolerance"}
+    if ratio <= 1:
+        return {**out, "conv_state": CONVERGED, "conv_reason": "amplitude within tolerance"}
     drift = abs(out.get("conv_cl_drift", 0.0))
     kind = "drift" if drift > 0.5 * out["conv_cl_amp"] else "amplitude"
-    ratio = max(out["conv_cl_amp"] / cl_lim, out["conv_cd_amp"] / cd_lim)
     return {**out, "conv_state": OSCILLATING, "conv_reason": f"{kind} {ratio:.1f}x tolerance"}
