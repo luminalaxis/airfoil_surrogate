@@ -45,6 +45,8 @@ class MeshSettings:
     farfield_size: float = 5.0    # (circle) 원거리 경계 셀 크기 [c]
     farfield_split: bool = False  # (circle) true면 앞쪽 반원 inlet(velocity-inlet) +
                                   # 뒤쪽 반원 outlet(pressure-outlet)으로 나눔 (밀도 일정 비압축 해석용)
+    farfield_outlet_angle: float = 90.0  # (circle, split) outlet 호의 반각 [deg]. 뒤쪽 ±이 각도만 outlet, 나머지는 inlet.
+                                  # 받음각 α에서 outlet으로 공기가 거꾸로 들어오지 않으려면 90 − |α|보다 작게 (예: 60 → |α| < 30°)
     # (box) 직사각형 인클로저: 앞 = inlet(velocity-inlet), 위·아래 = top·bottom(wall,
     #       Fluent에서 미끄럼 벽 = Specified Shear 0), 뒤 = outlet(pressure-outlet)
     box_upstream: float = 20.0    # 앞전 ~ inlet(앞 경계) 거리 [c]
@@ -87,7 +89,7 @@ _NOT_IN_FINGERPRINT = ("timeout",)          # 메쉬 결과에 영향 없는 항
 _ADDED_DEFAULTS = {                         # 나중에 추가된 항목과 그 기본값
     "farfield_split": False, "farfield_shape": "circle",
     "box_upstream": 20.0, "box_downstream": 40.0, "box_height": 20.0, "box_far_size": 2.0,
-    "refine": 1.0,
+    "refine": 1.0, "farfield_outlet_angle": 90.0,
 }
 # 다요소 날개 도구(AERO_AUTOMATION)에서 갈라져 나오며 없앤 항목과 그 기본값.
 # 지문에는 그대로 넣어, 분리 전에 만든 메쉬가 다시 만들어지지 않게 한다.
@@ -219,12 +221,14 @@ def _build_gmsh_model(geom: Geometry, s: MeshSettings, bl_thickness: float):
         grow = 0.5 * R  # 이 거리에 걸쳐 셀이 far_size까지 커짐
         cx = 0.5
         center = geo.addPoint(cx, 0, 0, lc)
+        # 원 위의 점: 0, β, π, 2π − β (β = outlet 반각, 기본 90° → 0, 90, 180, 270°)
+        beta = math.radians(min(max(s.farfield_outlet_angle, 10.0), 170.0))
         ring = [geo.addPoint(cx + R * math.cos(a), R * math.sin(a), 0, lc)
-                for a in (0, math.pi / 2, math.pi, 3 * math.pi / 2)]
+                for a in (0, beta, math.pi, 2 * math.pi - beta)]
         arcs = [geo.addCircleArc(ring[i], center, ring[(i + 1) % 4]) for i in range(4)]
         outer_loop = geo.addCurveLoop(arcs)
         if s.farfield_split:
-            # arcs: 0 = 뒤-위, 1 = 앞-위, 2 = 앞-아래, 3 = 뒤-아래 (반시계)
+            # arcs: 0 = 뒤-위(0~β), 1 = 앞-위(β~180°), 2 = 앞-아래(180°~360°−β), 3 = 뒤-아래(360°−β~360°)
             outer = {"inlet": ([arcs[1], arcs[2]], "velocity-inlet"),
                      "outlet": ([arcs[3], arcs[0]], "pressure-outlet")}
         else:

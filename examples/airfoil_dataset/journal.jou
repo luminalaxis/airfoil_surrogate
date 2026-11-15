@@ -17,8 +17,7 @@
 
 /file/read-case "${project_dir}/${base_case}"
 
-; 형상별 메쉬로 교체 (경계 이름 main / inlet / top / bottom / outlet 이 같아서 설정이 유지됨)
-; top / bottom 의 미끄럼 벽(Specified Shear 0) 설정도 베이스 케이스에서 그대로 유지됨
+; 형상별 메쉬로 교체 (경계 이름 main / inlet / outlet 이 같아서 설정이 유지됨)
 /file/replace-mesh "${mesh_file}"
 /mesh/check
 
@@ -34,6 +33,15 @@
 
 ; 리포트 파일(cx, cy)을 케이스 폴더에 저장 → 도구가 받음각으로 회전해 cl, cd 계산
 /solve/report-files/edit "coef-rfile" file-name "coef-rfile.out" q
+
+; 가상시간 스텝(Pseudo Time Step Scaling Factor) 기본값(1)은 실속 부근(NACA 0012, 12도, Re 5e5)에서
+; 고정점이 없어 cl이 영원히 진동합니다(주기 약 18회, cl 0.2~1.3). 0.05로 줄이면 같은 케이스가
+; 144회에 완전히 수렴합니다(cl=1.15, 잔차 1e-6). 저각도 케이스는 이 값으로도 빠르게 수렴해 손해가 없습니다.
+/solve/set/pseudo-time-method/global-time-step-settings yes 1 0.05
+
+; 잔차 기준(continuity, x-velocity, y-velocity, k, omega)을 1e-6으로. 베이스 케이스가 기본값 1e-3으로
+; 저장돼 있으면 100회 안팎에서 계수가 아직 변하는 중에 멈추므로 매 케이스 여기서 강제합니다.
+/solve/monitors/residual/convergence-criteria 1e-6 1e-6 1e-6 1e-6 1e-6
 
 /solve/initialize/hyb-initialization
 /solve/iterate ${iterations}

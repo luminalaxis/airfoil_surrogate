@@ -72,8 +72,16 @@ def test_convergence_states():
     assert classify(_hist(np.full(500, 50.0)), cfg)["conv_state"] == "diverged"
     assert classify(None, cfg, {"state": "failed", "message": "로그 오류: Divergence detected"})["conv_state"] == "diverged"
     assert classify(None, cfg, {"state": "failed", "message": "종료 코드 3"})["conv_state"] == "no_data"
-    # 진동하지만 Fluent가 잔차 기준으로 수렴을 선언한 경우
-    assert classify(_hist(0.8 + 0.05 * np.sin(it / 5)), cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
+    # Fluent가 잔차 기준으로 수렴을 선언한 경우: 마지막 20 반복이 안정적이면 converged
+    settled = _hist(np.r_[0.8 + 0.05 * np.sin(it[:480] / 5), np.full(20, 0.8)])
+    assert classify(settled, cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
+    # 느슨한 잔차 기준(예: 1e-3)으로 77회 만에 멈췄는데 계수가 아직 변하는 중이면 converged로 보지 않음
+    early = _hist(0.4 + 0.5 * np.exp(-np.arange(77) / 30))
+    res = classify(early, cfg, log_info={"solver_converged": True})
+    assert res["conv_state"] == "oscillating" and res["conv_reason"].startswith("stopped by residual criteria at 77 it")
+    # 96회에 수렴 선언, 초기 과도 구간에 |계수| > 10이 있어도 발산으로 보지 않음 (NACA 0018 사례)
+    transient = _hist(np.r_[np.full(10, 30.0), np.full(86, 0.6)])
+    assert classify(transient, cfg, log_info={"solver_converged": True})["conv_state"] == "converged"
 
 
 def test_solver_log_residuals(tmp_path):
@@ -123,7 +131,7 @@ def test_airfoil_dataset_example_config():
     assert len(cases) == 120 * 14 * 2
     assert len({c.mesh.name for c in cases}) == 120          # 형상당 메쉬 1개 (받음각·Re 공유)
     assert all(c.mesh.settings.reynolds == 500000 for c in cases)  # 첫 셀 높이는 큰 Re 기준
-    assert all(c.mesh.settings.farfield_shape == "box" for c in cases)
+    assert all(c.mesh.settings.farfield_shape == "circle" and c.mesh.settings.farfield_split for c in cases)
     c = next(c for c in cases if c.name == "naca2412_Re200000_a4")
     assert str(c.params["main_airfoil"]) == "2412" and c.params["flow_angle"] == 4
     assert c.params["velocity"] == pytest.approx(200000 * 1.7894e-5 / (1.225 * 0.3))
@@ -148,6 +156,37 @@ def test_split_farfield_mesh(tmp_path):
                     "farfield_radius": 20}, tmp_path)
     info = generate_mesh(job, tmp_path, plots=False)
     assert set(info["zones"]) == {"interior-fluid", "main", "inlet", "outlet"}
+
+
+def test_split_farfield_outlet_angle(tmp_path):
+    """outlet 반각을 줄이면 outlet 면은 모두 뒤쪽 ±β 안에 있고, inlet이 위·아래를 덮는다."""
+    import math
+
+    import numpy as np
+
+    from airfoil_surrogate.meshing import make_job, generate_mesh
+    from airfoil_surrogate.fluent_msh import read_msh
+
+    job = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5},
+                   {"farfield_split": True, "farfield_outlet_angle": 60, "surface_cells": 80,
+                    "near_size": 0.03, "wake_size": 0.03, "farfield_radius": 20}, tmp_path)
+    info = generate_mesh(job, tmp_path, plots=False)
+    assert set(info["zones"]) == {"interior-fluid", "main", "inlet", "outlet"}
+    msh = read_msh(job.mesh_file)
+    nodes = msh["nodes"]
+    zone = {name: (zid, bc) for zid, (bc, name) in msh["names"].items()}
+    for name, bc, inside in (("outlet", "pressure-outlet", True), ("inlet", "velocity-inlet", False)):
+        zid, zone_bc = zone[name]
+        assert zone_bc == bc
+        mids = np.array([(nodes[f[0] - 1] + nodes[f[1] - 1]) / 2 for f in (msh["faces"][i] for i in msh["zones"][zid])])
+        ang = np.degrees(np.arctan2(mids[:, 1], mids[:, 0] - 0.5))
+        assert np.all((np.abs(ang) < 60) == inside), name
+    # 기본값(90°)은 지문에 들어가지 않아 기존 메쉬를 다시 만들지 않는다
+    base = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5}, {"farfield_split": True}, tmp_path)
+    same = make_job({"main_airfoil": "0012", "chord": 1.0, "reynolds": 5e5},
+                    {"farfield_split": True, "farfield_outlet_angle": 90.0}, tmp_path)
+    assert base.fingerprint() == same.fingerprint() != job.fingerprint()
+    assert math.isclose(job.settings.farfield_outlet_angle, 60)
 
 
 def test_box_enclosure_mesh(tmp_path):
