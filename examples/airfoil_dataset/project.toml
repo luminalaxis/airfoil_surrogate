@@ -1,5 +1,5 @@
 # 단일 익형 양항계수 데이터셋 (인공지능개론 텀프로젝트: CFD 없이 CL/CD를 예측하는 회귀 모델)
-#   형상 120개 (NACA 4자리 60 + UIUC 60) × 받음각 14개 × Re 2개 = 3,360 케이스
+#   형상 120개 (NACA 4자리 60 + UIUC 50 + high_camber 10) × 받음각 12개 × Re 1개 = 1,440 케이스
 #   Fluent 2D 정상 상태, k-ω SST, 자유류 (원형 영역 반지름 50c: 뒤쪽 ±60° = outlet, 나머지 = inlet)
 #
 #   afs fetch-airfoils   UIUC 좌표 파일 내려받기 (airfoils/*.dat)
@@ -16,8 +16,8 @@
 name = "airfoil_dataset"
 template = "journal.jou"
 output_dir = "runs"
-max_parallel = 1             # 동시에 돌릴 케이스 수 (라이선스/코어 수 고려)
-# 팀원 4명 분담: 각자 afs run --part K/4 (K = 1~4). 형상 30개씩 840 케이스.
+max_parallel = 4             # 동시에 돌릴 케이스 수 (코어 20개, 케이스당 4프로세스 → 16코어 사용)
+# 팀원 4명 분담: 각자 afs run --part K/4 (K = 1~4). 형상 30개씩 360 케이스.
 #   끝나면 각자의 runs/<형상>/ 폴더를 한 runs/ 에 모은 뒤 collect → dataset
 
 [solver]
@@ -25,7 +25,7 @@ kind = "fluent"
 # executable = 'C:\Program Files\ANSYS Inc\v261\fluent\ntbin\win64\fluent.exe'
 mode = "2ddp"
 processes = 4
-graphics = false             # 3,360 케이스라 이미지 저장은 끔 (필요한 케이스만 따로)
+graphics = false             # 1,440 케이스라 이미지 저장은 끔 (필요한 케이스만 따로)
 timeout_minutes = 30
 
 [constants]
@@ -42,15 +42,15 @@ name = "{airfoil}_Re{reynolds}_a{aoa}"
 group = "{airfoil}"
 
 [cases.sweep]
-aoa = [-4, -2, 0, 2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16]   # 14개, 실속 부근 11~16°는 1° 간격
-reynolds = [200000, 500000]
+aoa = [4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]   # 12개: 4°, 6° + 실속 부근 7~16°는 1° 간격
+reynolds = [456346]          # 1개: 코드 0.3 m에서 유속 22.22 m/s (Re ≈ 4.6×10⁵)
 
 [derived]                    # Fluent 기본 공기 물성: ρ = 1.225 kg/m³, μ = 1.7894e-5 Pa·s
-velocity = "reynolds * 1.7894e-5 / (1.225 * chord)"   # [m/s] Re 2e5 → 9.7 m/s, 5e5 → 24.3 m/s
+velocity = "reynolds * 1.7894e-5 / (1.225 * chord)"   # [m/s] Re 456346 → 22.22 m/s
 mach = "velocity / 340.29"
 
 [mesh]
-# chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 5e5 기준 → y+ ≤ 1)
+# chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 4.6e5 기준 → y+ ≤ 1)
 farfield_shape = "circle"    # 원형 원거리 경계
 farfield_radius = 50         # 원 반지름 [c] (코드 0.3 m → 15 m)
 farfield_size = 5.0          # 원거리 경계 셀 크기 [c]

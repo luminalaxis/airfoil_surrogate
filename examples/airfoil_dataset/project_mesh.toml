@@ -1,9 +1,9 @@
 # 메시 독립성 확인 (본 생성 전 한 번, docs/FLUENT_BASE_CASE_AIRFOIL.md "메시 독립성과 풍동 실측 비교")
-#   NACA 0012 × 받음각 4°·12° × Re 2개 × 메쉬 3단계 = 12 케이스 (메쉬는 단계별 3개, 받음각·Re와 공유)
+#   NACA 0012 × 받음각 4°·12° × Re 1개(4.6×10⁵, 본 생성과 같음) × 메쉬 3단계 = 6 케이스 (메쉬는 단계별 3개, 받음각·Re와 공유)
 #   베이스 케이스·저널은 본 생성(project.toml)과 같은 것을 씁니다.
 #
 #   afs -c project_mesh.toml mesh    메쉬 3개 (단계마다 셀 크기 1.5배 차이 → 셀 수 약 2.2배)
-#   afs -c project_mesh.toml run     Fluent 12 케이스
+#   afs -c project_mesh.toml run     Fluent 6 케이스
 #   afs -c project_mesh.toml gci     → runs_mesh/mesh_study/gci.csv, gci_*.png
 #
 #   판단 기준 예: 보통(2단계) 메쉬의 GCI가 CL 1~2%, CD 5% 이내면 project.toml [mesh] 설정 그대로 본 생성
@@ -36,16 +36,16 @@ group = "mesh_{airfoil}"
 airfoil = ["naca0012"]
 main_airfoil = ["0012"]
 aoa = [4, 12]                # 부착 유동 1개, 실속 부근 1개
-reynolds = [200000, 500000]
+reynolds = [456346]          # 본 생성(project.toml)과 같은 Re: 유속 22.22 m/s
 mesh_level = [1, 2, 3]       # 1 = 성김, 2 = 보통(본 생성 설정), 3 = 조밀
 
 [derived]                    # Fluent 기본 공기 물성: ρ = 1.225 kg/m³, μ = 1.7894e-5 Pa·s
-velocity = "reynolds * 1.7894e-5 / (1.225 * chord)"   # [m/s] Re 2e5 → 9.7 m/s, 5e5 → 24.3 m/s
+velocity = "reynolds * 1.7894e-5 / (1.225 * chord)"   # [m/s] Re 456346 → 22.22 m/s
 mach = "velocity / 340.29"
 refine = "1.5 ** (mesh_level - 2)"   # [mesh] refine: 단계마다 셀 크기 1.5배 차이 (2단계 = 본 생성 메쉬)
 
 [mesh]
-# chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 5e5 기준 → y+ ≤ 1)
+# chord, reynolds 는 케이스 변수에서 가져옴 (형상당 메쉬 1개, 첫 셀 높이는 Re 4.6e5 기준 → y+ ≤ 1)
 farfield_shape = "circle"    # 원형 원거리 경계
 farfield_radius = 50         # 원 반지름 [c] (코드 0.3 m → 15 m)
 farfield_size = 5.0          # 원거리 경계 셀 크기 [c]

@@ -270,7 +270,7 @@ def cmd_train(args) -> int:
                         n_seeds=args.seeds, epochs=args.epochs, stall_weight=args.stall_weight,
                         ood_train_fraction=args.ood_train_fraction, name=args.name)
     r = train(cfg, opts)
-    print(f"학습 케이스 {r['n_train']}개, 검증 {r['n_val']}개, 입력 {len(r['features'])}개 ({opts.features} + aoa + log10_re)")
+    print(f"학습 케이스 {r['n_train']}개, 검증 {r['n_val']}개, 입력 {len(r['features'])}개 ({opts.features} + {' + '.join(c for c in r['features'] if not c.startswith(opts.features))})")
     if r["moved"]:
         print(f"test_ood 형상 {len(r['moved'])}개를 학습에 추가: {', '.join(r['moved'])}")
     print(f"[ ] = 형상 단위 부트스트랩 95% 신뢰구간, PI{PI_TAG} = {PI_TAG}% 예측 구간 (CL)")

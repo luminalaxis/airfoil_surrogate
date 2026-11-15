@@ -62,7 +62,7 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 ```
 
 확인: `/define/named-expressions/list`에 두 개가 보이면 됩니다.
-저널이 케이스마다 `speed`(Re 2×10⁵ → 9.738 m/s, 5×10⁵ → 24.35 m/s)와 `alpha`(받음각)를 바꿉니다.
+저널이 케이스마다 `speed`(Re 456346 → 22.22 m/s)와 `alpha`(받음각)를 바꿉니다.
 
 ## 6. Boundary Conditions
 
@@ -137,7 +137,7 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 1. `Solution > Initialization`: **Hybrid** → Initialize
 2. `Run Calculation`: 20 iterations → Calculate
 3. 오류 없이 돌고 `coef-rfile.out`이 생기는지 확인
-4. (권장) 수렴할 때까지 돌린 뒤 확인: inlet·outlet의 평균 Y Velocity가 둘 다 약 0.68 m/s, `cy` ≈ 0.41, `cx` ≈ −0.012 (4°, Re 2×10⁵)
+4. (권장) 수렴할 때까지 돌린 뒤 확인: inlet·outlet의 평균 Y Velocity가 둘 다 약 1.55 m/s(= 22.22 · sin 4°), `cy` ≈ 0.4 (4°, Re 4.6×10⁵)
 
 ## 11. 저장
 
@@ -146,7 +146,7 @@ Density **constant 1.225**, Viscosity **constant 1.7894e-05** (마하수 0.03~0.
 ## 12. 파일럿 실행
 
 ```bash
-afs run --only "naca0012_Re200000_a4" "naca0012_Re500000_a12"
+afs run --only "naca0012_Re456346_a4" "naca0012_Re456346_a12"
 ```
 
 ```bash
@@ -154,10 +154,10 @@ afs collect --only "naca0012*"
 ```
 
 확인할 것
-- `runs\naca0012\naca0012_Re200000_a4\solver.log`에 Error가 없는지
-- `runs\summary.csv`의 해당 행: `cl` ≈ 0.40~0.46, `cd` ≈ 0.012~0.017 (완전 난류 SST, Re 2×10⁵), `conv_state`, `yplus-max`(첫 셀 높이 기준값 1을 크게 넘지 않는지, 예: 5 이하)
+- `runs\naca0012\naca0012_Re456346_a4\solver.log`에 Error가 없는지
+- `runs\summary.csv`의 해당 행: `cl` ≈ 0.40~0.46, `cd`는 Re 2×10⁵ 때(0.012~0.017)보다 약간 작은 값 (4°, 완전 난류 SST, Re 4.6×10⁵), `conv_state`, `yplus-max`(첫 셀 높이 기준값 1을 크게 넘지 않는지, 예: 5 이하)
 - `convergence.png` 제목에 수렴 상태가 표시됨
-- 케이스당 소요 시간 (`afs status`) → 3,360 케이스 전체 일정 계산
+- 케이스당 소요 시간 (`afs status`) → 1,440 케이스 전체 일정 계산
 
 저널 명령이 버전에 맞지 않으면 GUI에서 `File > Write > Start Journal`로 같은 작업(Replace Mesh, Named Expression 수정, Reference Values 수정)을 녹화해 `journal.jou`의 해당 줄을 교체하세요.
 
@@ -171,7 +171,7 @@ afs collect --only "naca0012*"
    `--only "naca0012*"`로 `mesh`, `run`을 실행합니다. 예: `examples/airfoil_dataset/project_mesh.toml`
 2. `afs -c project_mesh.toml gci`로 CL, CD의 Richardson 외삽값과 GCI(이산화 불확실성)를 봅니다.
    보통(2단계) 메쉬의 GCI가 1~2% 이내면 본 생성 설정으로 고정
-3. 공개 풍동 실측(예: Re 2×10⁵ 부근 NACA 0012 극선도)과 같은 받음각에서 비교
+3. 공개 풍동 실측(예: Re 4.6×10⁵ 부근 NACA 0012 극선도)과 같은 받음각에서 비교
 
 ## Transition SST 비교 (경계 사례용)
 
@@ -184,9 +184,9 @@ afs collect --only "naca0012*"
    base_case = "base_airfoil_tsst.cas.h5"
    turbulence_model = "transition-sst"
    ```
-3. Re 2×10⁵ 케이스 일부만 실행합니다. 신뢰성 검증용 NACA 0012와, 경계 사례로 쓸 평가(test)·처음 보는 형상(test_ood) 몇 개(예: 3~5개)를 받음각 전체로 돌리는 것을 권장합니다. 형상별 분할은 `runs/dataset/split.json`에서 확인합니다.
+3. 케이스 일부만 실행합니다 (Re는 본 생성과 같은 4.6×10⁵). 신뢰성 검증용 NACA 0012와, 경계 사례로 쓸 평가(test)·처음 보는 형상(test_ood) 몇 개(예: 3~5개)를 받음각 전체로 돌리는 것을 권장합니다. 형상별 분할은 `runs/dataset/split.json`에서 확인합니다.
    ```bash
-   afs -c project_tsst.toml run --only "naca0012_Re200000_*" "s1223_Re200000_*" "e423_Re200000_*"
+   afs -c project_tsst.toml run --only "naca0012_Re456346_*" "s1223_Re456346_*" "e423_Re456346_*"
    ```
 4. 본 프로젝트(`project.toml`)의 `[ml]`에 결과 위치를 적고 데이터셋을 다시 만듭니다.
    ```toml
@@ -196,5 +196,5 @@ afs collect --only "naca0012*"
    ```bash
    afs dataset
    ```
-   이름이 같은 케이스끼리 짝지어 `dataset.csv`에 `cl_tsst`, `log10_cd_tsst`, `d_cl_tsst`, `d_log10_cd_tsst`(T-SST − SST)가 붙고, Re별 차이(중앙값, 최대와 그 케이스)가 출력됩니다. Re 2×10⁵에서는 층류 박리 기포 때문에 두 모델의 CD 차이가 크게 날 수 있습니다.
+   이름이 같은 케이스끼리 짝지어 `dataset.csv`에 `cl_tsst`, `log10_cd_tsst`, `d_cl_tsst`, `d_log10_cd_tsst`(T-SST − SST)가 붙고, Re별 차이(중앙값, 최대와 그 케이스)가 출력됩니다. 이 Re(4.6×10⁵)에서도 층류 박리 기포 때문에 두 모델의 CD 차이가 크게 날 수 있습니다.
 5. `afs train` → `afs edge-cases`를 다시 실행하면 경계 사례에 "난류 모델에 따라 정답이 크게 달라지는 케이스" 2개가 들어갑니다(평가 분할 형상만 해당). Transition SST 정답은 학습에 쓰지 않습니다.

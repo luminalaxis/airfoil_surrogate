@@ -69,7 +69,8 @@ def feature_columns(rows: list[dict], features: str) -> list[str]:
              and k[len(features) + 2:].isdigit()]
     if not shape:
         raise ConfigError(f"데이터셋에 {features}_* 열이 없습니다. [ml] cst_orders를 확인하고 dataset을 다시 만드세요.")
-    return shape + ["aoa", "log10_re"]
+    # Re가 하나뿐이면 log10_re는 상수라 입력에서 뺀다 (CST 16 + α = 17개)
+    return shape + ["aoa"] + (["log10_re"] if len({r["log10_re"] for r in rows}) > 1 else [])
 
 
 def _matrix(rows: list[dict], cols: list[str]) -> np.ndarray:

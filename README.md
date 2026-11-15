@@ -43,10 +43,10 @@ pip install -e ".[ml]"
 | 항목 | 내용 |
 |---|---|
 | 형상 | NACA 4자리 60개(공식 생성) + UIUC 60개(`airfoils.csv`). UIUC 중 **캠버 6.5% 이상 10개**(`family = high_camber`: s1223, s1210, e423, ch10sm, fx74cl5140, mh114, dae11, dae21, goe226, e591)는 학습에서 빼고 "처음 보는 형상" 평가에만 씀 |
-| 받음각 | −4, −2, 0, 2, 4, 6, 8, 10, 11~16° (14개, 실속 부근 1° 간격) |
-| Re | 2×10⁵, 5×10⁵ (코드 0.3 m 기준 유속 9.7, 24.3 m/s) |
+| 받음각 | 4, 6, 7~16° (12개, 실속 부근 7~16°는 1° 간격) |
+| Re | 4.6×10⁵ 1개 (코드 0.3 m 기준 유속 22.22 m/s) |
 | 해석 | Fluent 2D 정상 상태 k-ω SST, 원형 영역(반지름 50c, 뒤쪽 ±60° = outlet, 나머지 = inlet, 받음각은 inlet 속도 성분), 형상당 메쉬 1개 |
-| 입력 → 목표 | CST 계수 16개(면당 8개) + 받음각 + log10(Re) → CL, log10(CD) |
+| 입력 → 목표 | CST 계수 16개(면당 8개) + 받음각 → CL, log10(CD) (Re가 하나라 log10(Re)는 입력에서 자동 제외) |
 | 라벨 규칙 | 케이스마다 수렴 상태(`conv_state`)와 y+(`yplus_max`, `yplus_avg`) 기록. 수렴 케이스는 마지막 200회, 진동 케이스는 마지막 500회 반복 평균. 발산 케이스는 학습·평가에서 빼고 건수만 보고 |
 | 평가 | 조건별 MAE와 표본 수, 형상 단위 부트스트랩 95% 신뢰구간, 90% 예측 구간의 실제 포함률. 실행 간 비교는 공통 케이스만으로(`compare`), 경계 사례 10개(`edge-cases`) |
 
@@ -61,7 +61,7 @@ afs fetch-airfoils      # UIUC 좌표 60개를 airfoils/ 에 내려받음 (없�
 ```
 
 ```bash
-afs plan --dry-run      # 3,360 케이스, 형상(메쉬) 120개
+afs plan --dry-run      # 1,440 케이스, 형상(메쉬) 120개
 ```
 
 ```bash
@@ -71,7 +71,7 @@ afs mesh                # 형상별 메쉬 (각 5~8초)
 Fluent 베이스 케이스 `base_airfoil.cas.h5`를 만든 뒤([docs/FLUENT_BASE_CASE_AIRFOIL.md](docs/FLUENT_BASE_CASE_AIRFOIL.md)) 팀원 4명이 나눠 실행합니다.
 
 ```bash
-afs run --part 1/4      # 팀원별로 1/4 ~ 4/4. 형상 30개(840 케이스)씩, 같은 형상은 한 사람에게
+afs run --part 1/4      # 팀원별로 1/4 ~ 4/4. 형상 30개(360 케이스)씩, 같은 형상은 한 사람에게
 ```
 
 각자의 `runs/<형상>/` 폴더를 한 `runs/`에 모은 뒤 정리합니다.
@@ -185,7 +185,7 @@ afs edge-cases --run cst16_h64x64 --model mlp
 
 ## Transition SST 비교 (신뢰성 검증, 경계 사례)
 
-Re 2×10⁵ 케이스 일부를 Transition SST로 다시 풀고([docs/FLUENT_BASE_CASE_AIRFOIL.md](docs/FLUENT_BASE_CASE_AIRFOIL.md) 맨 아래), `project.toml`에 결과 위치를 적습니다.
+케이스 일부(Re 4.6×10⁵)를 Transition SST로 다시 풀고([docs/FLUENT_BASE_CASE_AIRFOIL.md](docs/FLUENT_BASE_CASE_AIRFOIL.md) 맨 아래), `project.toml`에 결과 위치를 적습니다.
 
 ```toml
 [ml]

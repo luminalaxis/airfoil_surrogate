@@ -128,13 +128,13 @@ def test_csv_keeps_zero_padded_naca_codes():
 def test_airfoil_dataset_example_config():
     cfg = load_config(EXAMPLE)
     cases = build_cases(cfg)
-    assert len(cases) == 120 * 14 * 2
+    assert len(cases) == 120 * 12
     assert len({c.mesh.name for c in cases}) == 120          # 형상당 메쉬 1개 (받음각·Re 공유)
-    assert all(c.mesh.settings.reynolds == 500000 for c in cases)  # 첫 셀 높이는 큰 Re 기준
+    assert all(c.mesh.settings.reynolds == 456346 for c in cases)  # Re 1개 (22.22 m/s)
     assert all(c.mesh.settings.farfield_shape == "circle" and c.mesh.settings.farfield_split for c in cases)
-    c = next(c for c in cases if c.name == "naca2412_Re200000_a4")
+    c = next(c for c in cases if c.name == "naca2412_Re456346_a4")
     assert str(c.params["main_airfoil"]) == "2412" and c.params["flow_angle"] == 4
-    assert c.params["velocity"] == pytest.approx(200000 * 1.7894e-5 / (1.225 * 0.3))
+    assert c.params["velocity"] == pytest.approx(22.22, abs=1e-3)
     ml = MLConfig.from_dict(cfg.ml)
     fams = {c.params["airfoil"]: c.params["family"] for c in cases}
     assert sum(1 for f in fams.values() if f == "high_camber") == 10
@@ -143,7 +143,7 @@ def test_airfoil_dataset_example_config():
     # 팀원 4명 분담: 형상 단위로 겹치지 않게 나뉨
     parts = [partition_cases(cases, f"{k}/4") for k in range(1, 5)]
     assert sum(len(p) for p in parts) == len(cases)
-    assert [len(p) for p in parts] == [840] * 4
+    assert [len(p) for p in parts] == [360] * 4
     meshes = [{c.mesh.name for c in p} for p in parts]
     assert all(not (meshes[i] & meshes[j]) for i in range(4) for j in range(i + 1, 4))
 
