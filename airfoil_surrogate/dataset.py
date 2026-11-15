@@ -182,18 +182,23 @@ def join_tsst(rows: list[dict], tsst: dict[str, dict], usable: set[str]) -> list
 def mark_near_stall(rows: list[dict], window: float, usable: set[str]) -> None:
     """형상·Re별 CL 최대 받음각(aoa_clmax)과 그 ± window 안인지(near_stall)를 기록한다.
 
-    CL 최대는 학습에 쓸 수 있는 수렴 상태(usable)의 케이스로만 정한다.
+    CL 최대는 학습에 쓸 수 있는 수렴 상태(usable)의 케이스로만 정한다. CL 최대가 받음각 범위의
+    마지막 받음각이면(범위 안에서 실속이 관측되지 않음) near_stall = 0으로 둔다.
     """
     best: dict[tuple, tuple[float, float]] = {}
+    top: dict[tuple, float] = {}
     for r in rows:
         if r["conv_state"] in usable and r["cl"] is not None:
             key = (r["shape"], r["reynolds"])
+            top[key] = max(top.get(key, -math.inf), r["aoa"])
             if key not in best or r["cl"] > best[key][0]:
                 best[key] = (r["cl"], r["aoa"])
     for r in rows:
-        b = best.get((r["shape"], r["reynolds"]))
+        key = (r["shape"], r["reynolds"])
+        b = best.get(key)
         r["aoa_clmax"] = b[1] if b else ""
-        r["near_stall"] = int(b is not None and abs(r["aoa"] - b[1]) <= window + 1e-9)
+        stalls = b is not None and top[key] > b[1]
+        r["near_stall"] = int(stalls and abs(r["aoa"] - b[1]) <= window + 1e-9)
 
 
 def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) -> dict:

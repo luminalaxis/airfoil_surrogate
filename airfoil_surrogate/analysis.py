@@ -153,17 +153,9 @@ def edge_cases(cfg: ProjectConfig, run: str, model: str = "mlp", plots: bool = T
             return None
         return abs(r["d_cl_tsst"]) / scale["cl"] + abs(r["d_log10_cd_tsst"]) / scale["log10_cd"]
 
-    top: dict[tuple, float] = {}
-    for r in rows:
-        if r["conv_state"] in usable:
-            key = (r["shape"], r["reynolds"])
-            top[key] = max(top.get(key, -np.inf), r["aoa"])
-
-    def stalls(r: dict) -> bool:  # CL 최대 다음 받음각이 범위 안에 있음 = 실속이 관측됨
-        return r["aoa_clmax"] is not None and top[r["shape"], r["reynolds"]] > r["aoa_clmax"]
-
+    # near_stall은 받음각 범위 안에서 실속이 관측된 형상·Re에만 붙는다 (dataset.mark_near_stall)
     groups = {
-        "stall_pre": [r for r in pool if r["near_stall"] and stalls(r) and r["aoa"] <= r["aoa_clmax"]],
+        "stall_pre": [r for r in pool if r["near_stall"] and r["aoa"] <= r["aoa_clmax"]],
         "stall_post": [r for r in pool if r["near_stall"] and r["aoa"] > r["aoa_clmax"]],
         "attached_test": [r for r in pool if flow_regime(r) == "attached" and r["eval_split"] == "test"],
         "attached_ood": [r for r in pool if flow_regime(r) == "attached" and r["eval_split"] == "test_ood"],

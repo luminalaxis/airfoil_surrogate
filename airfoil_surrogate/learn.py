@@ -7,6 +7,7 @@
   baseline : 얇은 익형 이론 CL = 2π(α − α0) (α0는 형상의 캠버선으로 계산), log10 CD = 학습 데이터 평균
   lgbm     : LightGBM. 목표별로 평균 모델 + 분위 회귀(5%, 95%) 모델 → 90% 예측 구간
   mlp      : PyTorch 다층 퍼셉트론. 시드만 다른 n_seeds개 앙상블, 평균 = 예측, 표준편차 × 1.645 → 90% 예측 구간
+  lgbm·mlp의 예측 구간은 검증 세트로 폭을 보정한다 (conformal_factors, 배수는 run.json의 conformal_factors)
 
 평가 (runs/ml/<이름>/metrics.csv)
   분할(val, test, test_ood)마다 조건별 표본 수와 MAE(cl), MAE(log10_cd), 90% 예측 구간 폭·실제 포함률.
@@ -204,6 +205,34 @@ class MLPEnsemble:
         return out
 
 
+# ---------------------------------------------------------------- 예측 구간 보정
+
+def conformal_factors(rows: list[dict], preds: dict[str, np.ndarray]) -> dict[str, float]:
+    """검증 세트로 예측 구간 폭의 보정 배수를 구한다 (split conformal, 정규화 점수).
+
+    점수 s = |y − 구간 중심| / 구간 반폭. 배수 q = s의 ⌈(n+1)·0.9⌉/n 분위수이고, 구간을 중심 ± q·반폭으로
+    바꾸면 검증 세트와 같은 분포의 케이스에서 포함률이 90% 이상이 된다. MLP 앙상블 표준편차(모델 간
+    불일치만 반영)와 LightGBM 분위 회귀 모두 원래 구간이 좁게 나와 필요하다.
+    """
+    out = {}
+    n = len(rows)
+    level = min(1.0, math.ceil((n + 1) * PI_LEVEL) / n)
+    for t in TARGETS:
+        y = np.array([r[t] for r in rows])
+        lo, hi = preds[f"{t}_lo"], preds[f"{t}_hi"]
+        half = np.maximum((hi - lo) / 2, 1e-12)
+        out[t] = float(np.quantile(np.abs(y - (hi + lo) / 2) / half, level, method="higher"))
+    return out
+
+
+def apply_conformal(preds: dict[str, np.ndarray], factors: dict[str, float]) -> dict[str, np.ndarray]:
+    out = dict(preds)
+    for t, q in factors.items():
+        mid, half = (preds[f"{t}_hi"] + preds[f"{t}_lo"]) / 2, (preds[f"{t}_hi"] - preds[f"{t}_lo"]) / 2
+        out[f"{t}_lo"], out[f"{t}_hi"] = mid - q * half, mid + q * half
+    return out
+
+
 # ---------------------------------------------------------------- 평가
 
 class ShapeBootstrap:
@@ -332,6 +361,11 @@ def train(cfg: ProjectConfig, opts: TrainOptions) -> dict:
         model = makers[m]()
         model.fit(train_rows, val_rows, cols, weights)
         preds = model.predict(eval_rows)
+        if f"{TARGETS[0]}_lo" in preds:
+            # ponytail: 검증 세트는 조기 종료에도 쓰여 보정이 약간 낙관적일 수 있음. 엄밀히 하려면 보정용 분할을 따로 둘 것
+            factors = conformal_factors(val_rows, model.predict(val_rows))
+            preds = apply_conformal(preds, factors)
+            extra.setdefault("conformal_factors", {})[m] = factors
         predictions[m] = preds
         entries = evaluate(eval_rows, preds, m, usable, ml.seed) + count_only(parts["diverged"], m)
         metrics += sorted(entries, key=lambda e: (EVAL_SPLITS.index(e["split"]), e["condition"]))

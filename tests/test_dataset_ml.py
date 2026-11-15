@@ -408,6 +408,34 @@ def test_dataset_and_training_workflow(tmp_path, capsys):
     assert all((edge_dir / e["figure"]).is_file() for e in edges)
 
 
+def test_near_stall_only_when_stall_observed():
+    from airfoil_surrogate.dataset import mark_near_stall
+    rows = [{"shape": s, "reynolds": 2e5, "aoa": a, "cl": cl, "conv_state": "converged"}
+            for s, cls in (("stalls", (0.8, 1.2, 1.0)), ("rising", (0.8, 1.0, 1.2)))
+            for a, cl in zip((8.0, 12.0, 16.0), cls)]
+    mark_near_stall(rows, 2.0, {"converged"})
+    assert [r["near_stall"] for r in rows] == [0, 1, 0, 0, 0, 0]
+    assert rows[-1]["aoa_clmax"] == 16.0
+
+
+def test_conformal_factors_reach_target_coverage():
+    from airfoil_surrogate.learn import apply_conformal, conformal_factors
+    rng = np.random.default_rng(0)
+
+    def sample(n):
+        y = rng.normal(0, 1, n)
+        rows = [{"cl": v, "log10_cd": v} for v in y]
+        narrow = {k: np.full(n, s) for t in ("cl", "log10_cd") for k, s in ((f"{t}_lo", -0.5), (f"{t}_hi", 0.5))}
+        return rows, narrow, y
+
+    val_rows, val_preds, _ = sample(2000)
+    q = conformal_factors(val_rows, val_preds)
+    assert q["cl"] == pytest.approx(1.645 / 0.5, rel=0.05)
+    _, test_preds, y = sample(5000)
+    out = apply_conformal(test_preds, q)
+    assert 0.88 < np.mean((y >= out["cl_lo"]) & (y <= out["cl_hi"])) < 0.93
+
+
 def test_shape_bootstrap_ci_and_pairing():
     from airfoil_surrogate.learn import ShapeBootstrap
 
