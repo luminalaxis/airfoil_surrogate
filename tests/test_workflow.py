@@ -86,7 +86,7 @@ def test_run_status_collect(tmp_path, capsys):
     assert main(["-c", str(cfg_path), "run", "-j", "2"]) == 1  # 실패 케이스 포함
 
     cfg = load_config(cfg_path)
-    states = {c.name: json.loads((c.dir / "status.json").read_text())["state"] for c in build_cases(cfg)}
+    states = {c.name: json.loads((c.dir / "status.json").read_text(encoding="utf-8"))["state"] for c in build_cases(cfg)}
     assert states["M0.3_AoA4"] == "done"
     assert states["M0.3_AoA99"] == "failed"   # 로그의 "Divergence detected"
     assert states["M0.3_AoA-99"] == "failed"  # 종료 코드 3
@@ -114,5 +114,5 @@ def test_timeout_marks_failed(tmp_path):
     cfg_path.write_text(text)
     assert main(["-c", str(cfg_path), "run", "--only", "M0.3_AoA0"]) == 1
     cfg = load_config(cfg_path)
-    status = json.loads((build_cases(cfg)[0].dir / "status.json").read_text())
+    status = json.loads((build_cases(cfg)[0].dir / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "failed" and "시간 초과" in status["message"]

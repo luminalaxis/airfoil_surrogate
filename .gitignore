@@ -222,3 +222,7 @@ __marimo__/
 # 해석 결과 폴더 (runs_tsst/: Transition SST 비교, runs_mesh/: 메시 독립성 확인 등)
 runs/
 runs_*/
+
+# Fluent 실행 부산물 (작업 폴더에 남는 transcript, 리포트 파일)
+*.trn
+coef-rfile*.out
