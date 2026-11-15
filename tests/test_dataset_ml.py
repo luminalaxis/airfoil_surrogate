@@ -329,9 +329,18 @@ def test_dataset_and_training_workflow(tmp_path, capsys):
     assert float(r16["yplus_max"]) > 0 and r16["avg_iters"] in ("200", "500")
     assert next(r for r in rows if r["case"] == "naca6412_Re500000_a16")["d_cl_tsst"] == ""
 
-    # 다시 만들어도 분할은 그대로
+    # 다시 만들어도 분할은 그대로 (일부 형상만 만들어도 다른 형상의 분할을 지우지 않음)
+    assert main(["-c", str(cfg_path), "dataset", "--only", "naca2412*"]) == 0
+    assert json.loads((out / "split.json").read_text(encoding="utf-8"))["assignments"] == split
     assert main(["-c", str(cfg_path), "dataset"]) == 0
     assert json.loads((out / "split.json").read_text(encoding="utf-8"))["assignments"] == split
+
+    # 시간 초과 등으로 끝나지 않은 케이스는 이력이 남아 있어도 정답으로 쓰지 않음
+    status = tmp_path / "runs" / "naca2412" / "naca2412_Re200000_a4" / "status.json"
+    status.write_text(json.dumps({"state": "failed", "message": "시간 초과 (30분)"}), encoding="utf-8")
+    assert main(["-c", str(cfg_path), "dataset"]) == 0
+    rows = list(csv.DictReader((out / "dataset.csv").open(encoding="utf-8-sig")))
+    assert next(r for r in rows if r["case"] == "naca2412_Re200000_a4")["conv_state"] == "failed"
 
     capsys.readouterr()
     assert main(["-c", str(cfg_path), "train", "--seeds", "2", "--epochs", "300", "--name", "t16"]) == 0

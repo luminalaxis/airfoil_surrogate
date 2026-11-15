@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -200,6 +200,10 @@ def read_status(case: Case) -> dict:
         return {"state": "unknown"}
 
 
+_RUNNING: set = set()            # 실행 중인 솔버 프로세스 (병렬 실행 중 Ctrl+C 때 한꺼번에 종료)
+_STOP = threading.Event()
+
+
 def _write_status(case: Case, **status) -> None:
     (case.dir / STATUS_NAME).write_text(
         json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -293,6 +297,7 @@ def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
         except OSError as exc:
             _write_status(case, state="failed", command=cmd, message=f"실행 실패: {exc}")
             return RunResult(case, "failed", f"실행 실패: {exc}")
+        _RUNNING.add(proc)
         try:
             returncode = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -306,6 +311,11 @@ def run_case(cfg: ProjectConfig, case: Case, template_text: str | None = None,
             _kill_tree(proc)
             _write_status(case, state="interrupted", command=cmd)
             raise
+        finally:
+            _RUNNING.discard(proc)
+    if _STOP.is_set():  # 병렬 실행 중 Ctrl+C로 메인 스레드가 종료시킴
+        _write_status(case, state="interrupted", command=cmd)
+        return RunResult(case, "interrupted", "중단됨")
 
     elapsed = time.monotonic() - start
     if returncode != 0:
@@ -339,10 +349,24 @@ def run_all(cfg: ProjectConfig, cases: list[Case], force: bool = False,
             results.append(r)
         return results
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(run_case, cfg, c, template_text, force): c for c in cases}
-        for i, fut in enumerate(as_completed(futures), start=1):
-            r = fut.result()
-            report(i, r)
-            results.append(r)
+    _STOP.clear()
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        pending = {pool.submit(run_case, cfg, c, template_text, force) for c in cases}
+        while pending:
+            # 1초마다 깨어나야 Windows에서도 Ctrl+C가 메인 스레드에 바로 전달된다
+            done, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            for fut in done:
+                r = fut.result()
+                results.append(r)
+                report(len(results), r)
+    except KeyboardInterrupt:
+        # Ctrl+C는 메인 스레드에만 오므로 여기서 대기 케이스를 취소하고 실행 중인 솔버를 직접 끝낸다
+        _STOP.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        for proc in list(_RUNNING):
+            _kill_tree(proc)
+        pool.shutdown(wait=True)
+        raise
+    pool.shutdown(wait=True)
     return results

@@ -218,7 +218,7 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
     moved = [k for k, v in previous.items() if k in splits and splits[k] != v]
     split_path.write_text(json.dumps({
         "seed": ml.seed, "ratios": ml.split, "holdout_families": ml.holdout_families,
-        "assignments": dict(sorted(splits.items())),
+        "assignments": dict(sorted({**previous, **splits}.items())),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     warnings, fits = [], {}
@@ -260,6 +260,8 @@ def build_dataset(cfg: ProjectConfig, cases: list[Case], resplit: bool = False) 
         }
         if cl is None or row["log10_cd"] is None:
             row["conv_state"] = row["conv_state"] if row["conv_state"] == "diverged" else "no_data"
+        elif row["state"] != "done" and row["conv_state"] != "diverged":
+            row["conv_state"] = "failed"  # 시간 초과·오류·중단: 중간까지의 이력이라 정답으로 쓰지 않음
         row.update({k: v for k, v in info.items()
                     if k.startswith("cst") or k in ("thickness", "camber", "alpha0_thin_deg", "te_thickness")})
         rows.append(row)
